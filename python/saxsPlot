@@ -1,0 +1,220 @@
+#! /Library/Frameworks/Python.framework/Versions/Current/bin/python
+
+
+#   A Python script to plot one or more SAXS data files
+
+#  (c) 2009-2011 by David P. Goldenberg
+#  Please send feature requests, bug reports, or feedback to this address:
+#           Department of Biology
+#           University of Utah
+#           257 South 1400 East
+#           Salt Lake City, UT
+#     
+#           goldenberg@biology.utah.edu
+#     
+#  This software is distributed under the conditions of the BSD license.
+#  Please see the documentation for further details.
+
+import sys
+from optparse import OptionParser
+import numpy as np 
+import matplotlib.pyplot as plt
+
+import saxs as sx
+
+info = """ saxsPlot
+      A Python script to plot one or more SAXS data files
+      The program requires either one input argument, the name of the data file,
+      or the -s option and input directed from standard input
+    
+      Options:
+      -h, --help            show a help message with the options and exit
+      -i, --info            Show more help information.
+      -r, --raw             Raw input file. Default is pdh format
+      -s, --stdIn           Read data from system standard input
+      -p IMGFILENAME, --pflie=IMGFILENAME
+                            Image file name. Suffix specifies format. Default is None
+      -t PLOTTYPE, --type=PLOTTYPE
+                            Plot type. Options are linear, log, loglog, guinier, kratky. 
+                            Default is log.
+      --noErr               no I error data.
+      --qMin=QMIN           Minimum q-value for plotting
+      --qMax=QMAX           Maximum q-value for plotting
+      --iMin=IMIN           Minimum i-value for plotting
+      --iMax=IMAX           Maximum i-value for plotting
+    
+      The default behavior is to assume the data files are in PDH format
+      If the option -r (or --raw) is used, the program assumes the files 
+      are in a "raw" format and only looks for rows containing exactly three fields.
+      For data without errors, use the -r and -noErr options
+    
+      The plot can be saved as an image file by specifying 
+      a file name with the -p or -pfile name option
+      No file is saved if no name is specified.
+      The format is is specified by the file name suffix.  Supported formats are:
+      Supported formats are: emf, eps, pdf, png, ps, raw, rgba, svg, svgz.
+      Default format is png.
+    
+      The default plot type is a log(I) versus q plot.  
+      Other plot types can be specified with the -t or --type option. 
+      Options are: linear, log, loglog, guinier and kratky
+    
+      The --noErr option plots data without error bars
+      
+      --qMin and --qMax allow specification of the range of q values that are plotted.
+      
+      --iMin and --iMax allow specification of the range of I values that are plotted.
+    
+  """
+
+def main():
+    ##### Parse options and arguments   ##########
+    parser = OptionParser()
+    parser.add_option("-i", "--info", action="store_true", dest="showInfo", default=False,
+                    help ="Show more help information.")
+    parser.add_option("-r", "--raw", action = "store_true", dest="rawFile", default = False, 
+                   help="Raw input file. Default is pdh format")
+    parser.add_option("-s", "--si", action = "store_true", dest="stdin", default = False, 
+                       help="Read data from system standard input")  
+    parser.add_option("-p", "--pfile", action = "store", type="string", dest="imgFileName", default = None,
+                   help="Image file name. Suffix specifies format. Default is None")                                             
+    parser.add_option("-t", "--type", action = "store", type = "string", 
+                   dest="plotType", default = "log", 
+                   help="Plot type. Options are linear, log, loglog, guinier, kratky. Default is log.")      
+    parser.add_option("--noErr", action = "store_true", 
+                   dest="noErr", default = False, 
+                   help="no I error data.")
+    parser.add_option("--qMin", action = "store", type = "float", 
+                   dest="qMin", default = "0.0", 
+                   help="Minimum q-value for plotting")
+    parser.add_option("--qMax", action = "store", type = "float", 
+                   dest="qMax", default = "0.0", 
+                   help="Maximum q-value for plotting")
+    parser.add_option("--iMin", action = "store", type = "float", 
+                   dest="iMin", default = "0.0", 
+                   help="Minimum i-value for plotting")
+    parser.add_option("--iMax", action = "store", type = "float", 
+                   dest="iMax", default = "0.0", 
+                   help="Maximum i-value for plotting")
+
+
+    (options, args) = parser.parse_args()
+    
+    if options.showInfo:
+        sys.exit(info)
+
+    if not(options.stdin) and not(len(args) > 0):
+        message = """\n saxsPlot: A python script to plot SAXS profiles. '\
+                    +'\n For more information, type > saxsPlot.py -i"""
+        sys.exit(message)
+
+
+    if options.stdin:
+        dataFileNames= [None]
+    else:
+        dataFileNames = args
+    
+    
+    windowTitle = 'SAXS Plot'
+    if dataFileNames != [None]:
+        windowTitle += ': ' + dataFileNames[0]
+        if len(dataFileNames) > 1:
+            for name in dataFileNames[1:]:
+                windowTitle += ', ' + name
+
+    
+    ###### Read input data
+    dataSets=[] 
+    if options.rawFile:
+        for fileName in dataFileNames:
+            if options.noErr:
+                data = sx.readQI(fileName)
+            else:
+                data = sx.readQIE(fileName)
+            data = np.array(data)
+            dataSets.append(data)        
+    else:
+        headers=[]
+        for fileName in dataFileNames:    
+            header, data = sx.readPdh(fileName)
+            if options.noErr:
+                data = np.array(data)
+                dataSets.append([data[0],data[1]])
+            else:
+                data = np.array(data)
+                dataSets.append(data)
+            headers.append(header)
+
+    ######### Limits for q and I ############
+        
+    if options.qMin == options.qMax:
+        qlim = 0
+    elif (options.qMin ==0.0 and options.qMax !=0.0):
+        qMin = np.amin(dataSets[0][0])
+        for data in dataSets:
+            if np.amin(data[0]) < qMin:
+                qMin = np.amin(data[0])
+        qlim = [qMin, options.qMax]
+    elif (options.qMin !=0.0 and options.qMax ==0.0):
+        qMax = np.amax(dataSets[0][0])
+        for data in dataSets:
+            if np.amax(data[0]) > qMax:
+                qMax = np.amax(data[0])
+        qlim = [options.qMin, qMax]
+    else:        
+        qlim = [options.qMin,options.qMax]
+
+
+    if options.iMin == options.iMax:
+        ilim = 0
+    elif (options.iMin ==0.0 and options.iMax !=0.0):
+        iMin = np.amin(dataSets[0][1])
+        for data in dataSets:
+            if np.amin(data[1]) < iMin:
+                iMin = np.amin(data[0])
+        ilim = [iMin, options.iMax]
+    elif (options.iMin !=0.0 and options.iMax ==0.0):
+        iMax = np.amax(dataSets[0][1])
+        for data in dataSets:
+            if np.amax(data[1]) > iMax:
+                iMax = np.amax(data[1])
+        ilim = [options.iMin, iMax]
+    else:        
+        ilim = [options.iMin,options.iMax]
+    
+    ########## Plot options
+    plotParam = [options.plotType,qlim,ilim]
+    if options.rawFile:
+        qUnits=0
+    else:
+        qUnits = headers[0][4][4]
+    if options.stdin:
+        legends = []
+    else:
+        legends = dataFileNames
+    
+    ####### Add (cm-1) to y-axis label only if all profiles are normalized to absolute intensity  ####
+    absI = False
+    if not options.rawFile:
+        absI = True
+        for head in headers:
+            if head[2][2] == 0:
+                absI = False
+
+    ######### Make the plot    
+    fig = plt.figure()
+    plotPos=111
+    ax = sx.saxsPlot(fig,plotPos, plotParam, dataSets,legends=legends, qUnits=qUnits, absI = absI)
+    fig.subplots_adjust(bottom=0.12) # This adds a little extra space at the bottom
+    
+    fig.canvas.set_window_title(windowTitle) 
+    
+    if options.imgFileName != None:
+        fig.savefig(options.imgFileName)
+        
+    plt.show()
+
+if __name__=="__main__":
+    main()
+
+

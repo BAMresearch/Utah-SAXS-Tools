@@ -1,0 +1,1410 @@
+#! /Library/Frameworks/Python.framework/Versions/Current/bin/python
+
+# A Python script for fitting SAXS data to model data
+# New version (April 2012) to allow incorporation of the structure function
+# for a solution of hard spheres
+
+# Even newer version (July 2012) to allow fitting to a linear combination
+# of two profiles
+
+#  (c) 2009-2011 by David P. Goldenberg
+#  Please send feature requests, bug reports, or feedback to this address:
+#           Department of Biology
+#           University of Utah
+#           257 South 1400 East
+#           Salt Lake City, UT
+#     
+#           goldenberg@biology.utah.edu
+#     
+#  This software is distributed under the conditions of the BSD license.
+#  Please see the documentation for further details.
+
+
+import sys
+import time
+import re
+from optparse import OptionParser
+
+import numpy as np 
+import matplotlib.pyplot as plt
+import matplotlib.ticker as ticker
+from scipy import interpolate
+from scipy.optimize import curve_fit
+from uncertainties import correlated_values
+from uncertainties import ufloat
+import saxs as sx
+
+info = """   saxsFit
+    A Python script for fitting SAXS data to model data
+    with provision for handling smeared data from a line-colimated SAXS instrument, and 
+    incorporation of a hard-sphere structure factor in the fit model.
+    Rather than desmearing the experimental data, the program smears the 
+    model data and compares this directly with the experimental data.
+    The only required fitting parameter is a scaling constant to match the intensity of
+    the model data to the experimental data.
+    Optionally, an intensity offset parameter can be introduced and allowed to float.
+    
+     Allows correction for:
+      1. smearing due to the length of the beam profile 
+      2. The finite width of the "detector slit", (equivalent to the width of the
+          integration profile used with a two dimensional detector or image plate), 
+          which further smears the scattering profile
+      3. The beam width
+    
+     In default mode, three arguments are required:
+      The name of a parameter file with smearing, plotting and output options.
+      The name of the file containing one or more model profiles
+      The name of the input file with saxs profile to be fit.
+    
+      Outputs the experimental and fit scattering profiles
+      with header information including reduced chi-squared results
+    
+    The parameters for the beam proflie and detctor slit length are read from
+    the header information of the experimental data file, in pdh format.
+    See the documentation for the Utah Saxs Tools
+    
+     The model file may contain multiple models, represented as pairs of columns containing I and Q data
+    
+    Options:
+      -h, --help  show a help message with options and exit
+      -i, --info  Show more help information and exit.
+      -s, --si    Read data from system standard input and write to standard
+                  output
+      --so        Direct output to system standard output
+    
+
+     A sample parameter file:  
+        # saxs fit parameters
+        0.025       # min q-value for fitting
+        0.3         # max q value for fitting
+        n           # include beam width correction (y or n)
+        n           # Allow background correction (fit constant offset)
+        # Options for fitting to a linear combination of two models
+        n           # fit to linear combination of 1st two models
+        0           # specified fraction of model A in linear comb.  Allow to float if 0
+        #  Parameters for incorporation of hard-sphere solution structure factor
+        n           # include structure factor in fit (y or n)
+        0           # specified volume density (phi) for structure factor (0<phi<0.5).  Allow to float if 0
+        0           # specified sphere radius for structure factor. Allow to float if 0       
+        #   Plot limits (limits are ignored if max is not greater than min)
+        0.0         # min q-value for plotting
+        0.5         # max q-value for plotting
+        0           # min i-value for plotting
+        0           # max i-value for plotting
+        #   Plot options
+        log         # plot type: "linear", "log", "loglog", "guinier" or "kratky"
+        1           # No of model fits to plot (starting with best fit)
+        y           # plot smear functions (y or n)
+        #   Output options
+        y           # Show plots (on screen): 'y' or 'n'
+        n           # Save plots: 'y' or 'n'
+        ps          # Image format for plots:  'emf', 'eps', 'pdf', 'png', 'ps', 'raw', 'rgba', 'svg', 'svgz' 
+    
+    
+      The first line of the model file contains names for individual models
+      each model is represented by two columns in subsequent lines
+      first column for each model is q, second column is intensity
+    
+    """
+
+def main():
+    # global variables are necessary for the function definitions used for curve_fit
+    # It's not pretty, but it seems to be the only way to do it with scipy.optimize
+    global modelTck, smearParams, modelData_i
+    
+    # handle arguments and options with OptionParser
+    parser = OptionParser()
+    parser.add_option("-i", "--info", action="store_true", dest="showInfo", default=False,
+                help ="Show more help information.")
+    parser.add_option("-s", "--si", action = "store_true", dest="stdin", default = False, 
+                help="Read data from system standard input and write to standard output")  
+    parser.add_option("--so", action = "store_true", dest="stdo", default = False, 
+                       help="Direct output to system standard output")                       
+
+
+    (options, args) = parser.parse_args()
+    
+    if options.showInfo:
+        sys.exit(info)
+
+    message = '\nsaxsFit.py: A Python script for fitting SAXS data to model data, '\
+                + 'with provision for handling smeared data from '\
+                + '\n a line-colimated SAXS instrument.'\
+                + 'For help, type > saxsFit -i '
+
+    if options.stdin:
+        if len(args) == 2:
+            expDataFileName = None
+            rootName = ''
+            outFileName = None
+        else:
+            sys.exit(message)
+    else:
+        if len(args) == 3:
+            expDataFileName = args[2]
+            rootName = expDataFileName.rpartition('.')[0]
+            outFileName = rootName+'_fit.txt'
+        else:
+            sys.exit(message) 
+    if options.stdo:
+        outFileName = None
+
+
+    parFileName = args[0]
+    modelFileName = args[1]
+
+    ###### Window Title
+    if expDataFileName == None:
+        windowTitle = 'SAXS Model Fitting'
+    else:   
+        windowTitle = 'SAXS Model Fitting: ' + expDataFileName
+    
+        
+    params = readParamFile(parFileName)
+
+    # header and data from experimental parameter file
+    # expData is a list of 3 1-dimensional numpy arrays: q, I, errors
+    pdhHeader, expData = sx.readPdh(expDataFileName)    
+    
+    # smearing parameters from header of pdh file
+    wParams = sx.setWparams(pdhHeader)
+    qUnits = pdhHeader[4][4]
+    
+    # no beam-width smearing specified in the parameter file
+    # overrides parameters from pdhFile    
+    if params['bwCorr']==0:    
+        wParams[3]=0
+
+    bhw = wParams[3]
+    
+    
+    # Determine the range over which the smearing weighting function is significant.
+    # I define this as values for which w(y) > eps*w(0)
+    # The function wYmax(a,b,Ld,eps) finds the maximum y value by this criterion
+    # eps=0.01 seems like a reasonable value
+    # The maximum x and y values define the range for which the smeared scattering intensity
+    # can be calculated
+    
+    eps = 0.01
+    wym =  sx.wYmax(wParams,eps)
+    wxm = sx.wXmax(bhw,eps)
+
+    # Next calculate the integral of the y-weighting factor over the 
+    # values considered, to use for normalization.
+    # The x-weighting funciton (a Gaussian) is automatically normalized
+    wnf = sx.wNormFact(wParams,wym)
+    
+    # make smearing parameters global
+    smearParams=[wParams,wxm,wym,wnf]
+    
+    modelData = readModelData(modelFileName)
+    
+    # if linear combination option is specified,
+    # check that the model file contains at least 2 models
+    
+    if params['linComb'][0] == 1:
+        if len(modelData[0]) < 2:
+            message = '\nsaxsFit error: The linear-combination option requires two models.'
+            sys.exit(message)
+        if params['strFact'][0] == 1:
+            message = '\nsaxsFit error: The linear-combination and structure-factor options cannot be used at the same time.'
+            sys.exit(message)
+
+    # model data is a list of three lists:
+    #   model names (strings)
+    #   lists of q-values for models
+    #   lists of I-values for models
+    #   modelData[0][i] is the name for model i
+    #   modelData[1][i] is a list containing q-values for model i
+    #   modelData[2][i] is a list containing I-values for model i
+
+    # turn lists into numpy arrays
+    modelData[1]=np.array(modelData[1])
+    modelData[2]=np.array(modelData[2])
+    
+
+    # select experimental data that cover the q-range selected for fitting
+    qSel =[]
+    iExpSel = []
+    iErrSel = []
+    for i,q in enumerate(expData[0]):
+        if (params['qMin'] <= q <= params['qMax']):
+            qSel.append(q)
+            iExpSel.append(expData[1][i])
+            iErrSel.append(expData[2][i])
+    
+    # turn everything into a numpy array
+    expDataSel = np.array([qSel,iExpSel,iErrSel])
+
+    if params['linComb'][0] == 0:
+        # Fits to all models in the model file,
+        # with options for structure factor
+        
+        # fit experimental data to each of the model profiles
+        # build fitResults as a dictionary in which 
+        # the keys are the reduced chi-squared values from the fits
+        # and the values are five element lists containing the model number
+        # the fit multiplicative scaling constant and the fit offset
+        # the structure factor phi and r
+        # At the same time generate array of fit models
+        fitResults={}
+        fitConsts=[]
+        fitModelData = [modelData[0],[],[]]
+        for i in range(len(modelData[0])):
+            qMaxModel = modelData[1][i][-1]
+            qMinModel = modelData[1][i][0]
+            if wParams[0] != 0:
+                smearWarning = ('Warning: The data for the model ' + modelData[0][i]  
+                                + ' does not extend to large enough q to allow smearing.\n'
+                                + 'This model will be ignored')
+        
+                if qMaxModel**2-wym**2 > 0:
+                    qMaxModel = np.sqrt(qMaxModel**2-wym**2) - wxm
+                    if qMaxModel <=0:
+                        print smearWarning
+                        break
+                else:
+                    print smearWarning
+                    break
+                
+            # check if users q range fits in model range
+            # Trim data for fitting if it exceeds model range
+            if (params['qMin'] < qMinModel or params['qMax'] > qMaxModel):
+                params['qMin'] = max(params['qMin'],qMinModel)
+                params['qMax'] = min(params['qMax'],qMaxModel)
+                trimQ =[]
+                trimI=[]
+                trimErr=[]
+                for j,q in enumerate(expDataSel[0]):
+                    if (params['qMin'] <= q <= params['qMax']):
+                        trimQ.append(q)
+                        trimI.append(expDataSel[1][j])
+                        trimErr.append(expDataSel[2][j])
+                expDataSel = np.array([trimQ,trimI,trimErr])
+            fitParams, modelFit = \
+                    fitData(expDataSel,[modelData[1][i],modelData[2][i]],
+                    params,wParams,qMinModel,qMaxModel)
+            fitModelData[1].append(modelFit[0])
+            fitModelData[2].append(modelFit[1])
+    
+            rChiSq=fitParams[0]
+            scale = fitParams[1]
+            off = fitParams[2]
+            phi = fitParams[3]
+            r = fitParams[4]
+            fitConsts.append([rChiSq,scale,off,phi,r])
+            fitResults[rChiSq] = [i, scale,off,phi,r]
+            
+    else:
+        # fits to linear combination of 1st 2 models in file.
+        
+        qMaxModel = min(modelData[1][0][-1],modelData[1][1][-1])
+        qMinModel = max(modelData[1][0][0],modelData[1][1][0])   
+        for i in range(2):
+            qMaxModel = modelData[1][i][-1]
+            qMinModel = modelData[1][i][0]
+        
+            if wParams[0] != 0:
+                smearWarning = ('Warning: The data for the model ' + modelData[0][i]  
+                                + ' does not extend to large enough q to allow smearing.\n'
+                                + 'This model will be ignored')     
+                if qMaxModel**2-wym**2 > 0:
+                    qMaxModel = np.sqrt(qMaxModel**2-wym**2) - wxm
+                    if qMaxModel <=0:
+                        print smearWarning
+                        break
+                else:
+                    print smearWarning
+                    break
+        
+                
+        # check if users q range fits in model range
+        # Trim data for fitting if it exceeds model range
+        if (params['qMin'] < qMinModel or params['qMax'] > qMaxModel):
+            params['qMin'] = max(params['qMin'],qMinModel)
+            params['qMax'] = min(params['qMax'],qMaxModel)
+            trimQ =[]
+            trimI=[]
+            trimErr=[]
+            for j,q in enumerate(expDataSel[0]):
+                if (params['qMin'] <= q <= params['qMax']):
+                    trimQ.append(q)
+                    trimI.append(expDataSel[1][j])
+                    trimErr.append(expDataSel[2][j])
+            expDataSel = np.array([trimQ,trimI,trimErr])
+
+        fitParams, modelFit = \
+                fitDataLinComb(expDataSel,[modelData[1][0],modelData[2][0]],
+                [modelData[1][1],modelData[2][1]], params,wParams,qMinModel,qMaxModel)
+        
+        fitModelDataNames = modelData[0][0] + ' ' + modelData[0][1]      
+        fitModelData = [[fitModelDataNames],[modelFit[0]],[modelFit[1]]]
+
+        rChiSq=fitParams[0]
+        scale = fitParams[1]
+        off = fitParams[2]
+        fA = fitParams[3]
+        fitConsts = [[rChiSq,scale,off,fA,None]]
+        fitResults ={}
+        fitResults[rChiSq] = [0, scale,off,fA,None]
+
+
+
+    # Plots        
+    if (params['showPlot'] or params['savePlot']):  
+    
+        if pdhHeader[2][2] == 1:
+            absI = True
+        else:
+            absI = False
+
+    
+        fig1 = plotData(params,expData, fitModelData, fitResults, expDataFileName,qUnits,absI)
+        fig1.canvas.set_window_title(windowTitle) 
+        
+        if len(modelData[0])==1:
+            fig1.subplots_adjust(bottom=0.13)
+        else:
+            fig1.subplots_adjust(bottom=0.07)
+            fig1.subplots_adjust(top=0.94)
+
+        if params['plotSmearFnc']:
+            fig2 = plotSmearFuncs(wParams)
+            fig2.canvas.set_window_title('SAXS Model Fitting: Beam Profiles') 
+        
+        if params['plotUnsmModel']:
+            fig3 = plotUnsmModel(params, modelData, fitResults, qUnits)
+
+
+        if params['savePlot']:
+            plotFileName = rootName+'_fit.'+ params['imgFormat']
+            fig1.savefig(plotFileName)
+
+
+        if params['showPlot']:    
+            plt.show()
+
+
+    writeResults(outFileName,expDataFileName,modelFileName,expData,
+                    fitModelData,params,wParams,fitConsts)
+        
+
+def readParamFile(parFileName):
+    """ Reads parameter file that specifies parameters 
+    for smearing, plotting and output.
+    Returns a dicitonary with keys and parameter values.
+    Dictionary keys:
+        qMin: minimum q value for fitting
+        qMax: maximum q value for fitting
+        bwCorr: beam width correction
+        bkgCorr: allow constant offset of profile to float in fitting
+        strFact: parameters for hard-sphere solution structure factor [strFact,sfPhi,sfR]
+        plotParam: plot parameters for sx.saxsPlot [plot type, qLim, iLim]
+        plotModelsN: number of models to plot, starting with best fit
+        plotSmearFnc: plot smearing functions
+        plotUnsmModel: plot unsmeared model for best fit, form factor and structure factor
+        showPlot: Boolean for show plots on screen
+        savePlot: Boolean for save plots as image file
+        imgFormat: Format for image files (ps, png, pdf, eps etcetera)
+    """
+
+    params = {}
+    inFile = open(parFileName,'r')
+    # read all lines in parameter file
+    
+    lines = inFile.readlines()
+    inFile.close()
+    
+    paramLines = []
+    # Find non-empty lines that do not begin with '#' and add them to parameter lines list
+    for line in lines:
+        line = line.strip()
+        if line != '' and line[0] != '#':
+            paramLines.append(line)
+        
+    # q-range for fitting
+    fields = paramLines[0].split()     
+    params['qMin'] = float(fields[0])
+    
+    fields = paramLines[1].split()     
+    params['qMax'] = float(fields[0])
+
+    # include beam-width correction
+    fields = paramLines[2].split()
+    if re.match(r'[yY]',fields[0]):
+        params['bwCorr'] = 1
+    else:
+        params['bwCorr'] = 0
+
+    # allow constant offset to float: background correction
+    fields = paramLines[3].split()
+    if re.match(r'[yY]',fields[0]):
+        params['bkgCorr'] = 1
+    else:
+        params['bkgCorr'] = 0
+        
+    # linear combination of first two models 
+    fields = paramLines[4].split()
+    if re.match(r'[yY]',fields[0]):
+        lc = 1
+    else:
+        lc = 0
+    # fixed fraction model A for structure factor function
+    fields = paramLines[5].split()
+    lcFa = float(fields[0])
+    params['linComb'] = [lc,lcFa]
+
+    ########## Hard-sphere solution structure factor
+    fields = paramLines[6].split()
+    if re.match(r'[yY]',fields[0]):
+        strFact = 1
+    else:
+        strFact = 0
+    # fixed phi for structure factor function
+    fields = paramLines[7].split()
+    sfPhi = float(fields[0])
+    # fixer r for structure factor
+    fields = paramLines[8].split()
+    sfR = float(fields[0])
+    params['strFact'] = [strFact,sfPhi,sfR]
+
+    ####### Plot Parameters, as used in saxs.saxsPlot
+    # q-range for plotting
+    fields = paramLines[9].split()     
+    qPlotMin = float(fields[0])
+    fields = paramLines[10].split()     
+    qPlotMax = float(fields[0])
+    if qPlotMax > qPlotMin:
+        qPlotLim = [qPlotMin,qPlotMax]
+    else:
+        qPlotLim = 0
+    # i-range for plotting
+    fields = paramLines[11].split()     
+    iPlotMin = float(fields[0])
+    fields = paramLines[12].split()     
+    iPlotMax = float(fields[0])
+    if iPlotMax > iPlotMin:
+        iPlotLim = [iPlotMin,iPlotMax]
+    else:
+        iPlotLim = 0
+    # plot type
+    fields = paramLines[13].split()     
+    plotType=fields[0]
+    params['plotParam'] = [plotType,qPlotLim,iPlotLim]
+
+
+    # no of models to plot
+    fields = paramLines[14].split()     
+    params['plotModelsN'] = int(fields[0])
+    
+    # plot smearing functions
+    fields = paramLines[15].split()     
+    if re.match(r'[yY]',fields[0]):
+        params['plotSmearFnc'] = 1
+    else:
+        params['plotSmearFnc'] = 0
+
+    # plot unsmeared model 
+    fields = paramLines[16].split()     
+    if re.match(r'[yY]',fields[0]):
+        params['plotUnsmModel'] = 1
+    else:
+        params['plotUnsmModel'] = 0
+
+        
+    # Plot display and save options
+    # Show plots on screen
+    fields = paramLines[17].split()     
+    if re.match(r'[yY]',fields[0]):
+        params['showPlot'] = 1
+    else:
+        params['showPlot'] = 0
+        
+    # Save plots
+    fields = paramLines[18].split()     
+    if re.match(r'[yY]',fields[0]):
+        params['savePlot'] = 1
+    else:
+        params['savePlot'] = 0
+    
+    # Image format
+    fields = paramLines[19].split()   
+    params['imgFormat'] = fields[0]
+        
+    return params
+
+
+def readModelData(modelFileName):
+    """ Reads model SAXS data. First line of model file contains names for individual models.
+    Each model is represented by two columns in subsequent lines
+    First column for each model is q, second column is intensity"""
+    
+    modelFile = open(modelFileName,'r')
+    line = modelFile.readline()
+    line = line[:-1]
+    modelNames = line.split()
+    q=[]
+    I=[]    
+    for name in modelNames:
+        q.append([])
+        I.append([])    
+    for line in modelFile.readlines():
+        line = line[:-1]    # Chop newline character
+        fields = line.split()     # Split line into fields
+        for i in range(len(modelNames)):
+            q[i].append(float(fields[2*i]))
+            I[i].append(float(fields[2*i+1]))
+    return [modelNames, q, I]     
+
+
+def checkQforSmear(qMax,wParams):
+
+    # Determine the range over which the smearing weighting function is significant.
+    # I define this as values for which w(y) > eps*w(0)
+    # The function wYmax(a,b,Ld,eps) finds the maximum y value by this criterion
+    # eps=0.01 seems like a reasonable value
+    # The maximum x and y values define the range for which the smeared scattering intensity
+    # can be calculated
+    
+    eps = 0.01
+    wym =  sx.wYmax(wParams,eps)
+
+    if qMax**2-wym**2 > 0:
+        # ok
+        return 1
+    else:
+        # not ok
+        return 0
+
+
+def smearModelTck(modelQs, modelIs, wParams):
+    """Applies smearing functions to a single model data set.  Uses functions in the saxs.py module.
+    Returns tck parameters for spline fit. Checks to make sure that model covers large enough
+    q for smearing.  Returns None if q range is not large enough."""
+    
+
+    if checkQforSmear(modelQs[-1],wParams) == 0:
+        return None
+        
+    bhw = wParams[3]
+
+    
+    # Determine the range over which the smearing weighting function is significant.
+    # I define this as values for which w(y) > eps*w(0)
+    # The function wYmax(a,b,Ld,eps) finds the maximum y value by this criterion
+    # eps=0.01 seems like a reasonable value
+    # The maximum x and y values define the range for which the smeared scattering intensity
+    # can be calculated
+    
+    eps = 0.01
+    wym =  sx.wYmax(wParams,eps)
+    wxm = sx.wXmax(bhw,eps)
+
+    # Next calculate the integral of the y-weighting factor over the 
+    # values considered, to use for normalization.
+    # The x-weighting funciton (a Gaussian) is automatically normalized
+    wnf = sx.wNormFact(wParams,wym)
+    
+    # calculate parameters for cubic spline represenation of the 
+    # unsmeared model scattering curve
+    tckUnsm = interpolate.splrep(modelQs,modelIs,s=0)
+
+    qMax = modelQs[-1]
+
+    qMaxSm = np.sqrt(qMax**2-wym**2) - wxm
+    qSm=[]
+    iSm=[]
+    for j,q in enumerate(modelQs):
+        if (q<=qMaxSm):
+            qSm.append(q)
+            iSm.append(sx.smearPt(q,tckUnsm,wParams,wym,wxm)/wnf)
+    # calculate cubic-spline parameters for the smeared model            
+    tckSm = interpolate.splrep(qSm,iSm,s=0)
+    return tckSm
+
+def fitData(expData,modelData,params,wParams,qMinModel,qMaxModel):
+    """Fits experimental data to model data, as specifie by parameters.
+    expData is a np list of three lists with experimental, q, i and errors
+    modelData is a np list of two lists with model q and i values
+    params is a dictionary of parameters defined in readParamFile:
+        qMin: minimum q value for fitting
+        qMax: maximum q value for fitting
+        bwCorr: beam width correction
+        bkgCorr: allow constant offset of profile to float in fitting
+        strFact: parameters for hard-sphere solution structure factor [strFact,sfPhi,sfR]
+        plotParam: plot parameters for sx.saxsPlot [plot type, qLim, iLim]
+        plotModelsN: number of models to plot, starting with best fit
+        plotSmearFnc: plot smearing functions
+        showPlot: Boolean for show plots on screen
+        savePlot: Boolean for save plots as image file
+        imgFormat: Format for image files (ps, png, pdf, eps etcetera)
+    wParams is a list of smearing parameters defined in the pdh file:
+        [beamProfType, a, b, bhw, Ld]
+    Returns a list of fitting parameters: 
+        [rChiSq,scale,off,phi,r]
+    For fits without structure factor, the model data are fit to a cubic spline,
+    with or without smearing, as specified by parameters.  The spline parameters
+    are stored in a global variable, modelTck, whish is made available to the
+    fitting functions used by curve_fit.
+    For fits with structture factor, the model has to be smeared after multiplication
+    by the structure factor, so this is done in the fitting functions.  For these fits,
+    the unmodified model data are stored in a global vairable, modelData_i"""
+    global modelTck, modelData_i, setPhi, setR
+    
+    q = expData[0]
+    i = expData[1]
+    err = expData[2]
+    
+    # make a copy of modelData to hold fit form of the model
+    # trim q values of fitModel to represent valid range after smearing
+    fitModel = [[],[]]
+    for j, qModel in enumerate(modelData[0]):
+        if (qMinModel <= qModel <= qMaxModel):
+            fitModel[0].append(qModel)
+    
+    fitModel[0] = np.array(fitModel[0])
+    
+    # if beam profile type is 0, no smearing
+    beamProfType = wParams[0]
+    
+    if params['strFact'][0] == 0:
+        # no structure factor
+        # determine spline parameters for model data, modelTck
+        # modelTck is global
+        if beamProfType == 0:
+            # unsmeared data, don't smear model
+            modelTck = interpolate.splrep(modelData[0],modelData[1],s=0)
+        else:
+            # smeared experimental data, smear model. 
+            modelTck = smearModelTck(modelData[0],modelData[1], wParams)            
+        if params['bkgCorr'] == 0:
+            # no adjustable background offset
+            paramNo=1
+            fitParam,fitCov = curve_fit(fitFunc0,q,i,p0=[1],sigma=err)
+            scale = fitParam[0]
+            off = 0.0                    
+        else:
+            # adjustable offset
+            paramNo=2                   
+            fitParam,fitCov =curve_fit(
+                        fitFunc1,q,i,p0=[1.0,0.0],sigma=err)
+            scale = fitParam[0]
+            off = fitParam[1]
+        # scale and offset model intensities with fit values for plotting
+        fitModel[1]=fitFunc1(fitModel[0] ,scale,off)
+        # calculate pred intensities for each experimental q, to calculate chi^2
+        iPred = fitFunc1(q,scale,off)
+        rChiSq = redChiSq(i, iPred, err, paramNo)                
+        fitParams = [rChiSq,scale,off,None,None]
+
+    else:
+        # include structure factor
+        # fitting functions need access to unsmeared model data in global variable
+        modelData_i = modelData
+        # check q-range for smearing, if necessary
+        if params['bkgCorr'] == 0:
+            # no adjustable background offset
+            if params['strFact'][1] == 0.0:
+                # phi floats 
+                if params['strFact'][2] == 0.0:
+                    # phi and r float
+                    paramNo=3
+                    fitParam,fitCov = curve_fit(fitFunc2,q, i,
+                                         p0=[1,0.2,20.0],sigma=err)
+                                         
+                    (scale,phi,r) = correlated_values(fitParam,fitCov)                     
+                    scale = scale.nominal_value
+                    off = 0.0
+                else:
+                    setR = params['strFact'][2]
+                    # only phi floats
+                    paramNo=2
+                    fitParam,fitCov = curve_fit(fitFunc4,q, i,
+                                         p0=[1,0.2],sigma=err)
+                    (scale, phi) = correlated_values(fitParam,fitCov)
+                    scale = scale.nominal_value
+                    off = 0.0
+                    r = ufloat((setR,0))                                              
+            else:
+                # phi fixed
+                setPhi = params['strFact'][1]
+                if params['strFact'][2] == 0.0:
+                    # r floats
+                    paramNo=2
+                    fitParam,fitCov = curve_fit(fitFunc6,q, i,
+                                         p0=[1,20.0],sigma=err)
+                    (scale, r) = correlated_values(fitParam,fitCov)
+                    scale = scale.nominal_value
+                    off = 0.0
+                    phi = ufloat((setPhi,0))
+                                          
+                else:
+                    # neither phi nor r float
+                    setR = params['strFact'][2]
+                    paramNo=1
+                    fitParam,fitCov = curve_fit(fitFunc8,q, i,
+                                         p0=[1.0],sigma=err)
+                    scale = fitParam[0]
+                    off = 0
+                    phi = ufloat((setPhi,0))
+                    r = ufloat((setR,0))                                             
+                                    
+        else:
+            # adjustable background offset
+            if params['strFact'][1] == 0.0:
+                # phi floats 
+                if params['strFact'][2] == 0.0:
+                    # phi and r float
+                    paramNo=4
+                    fitParam,fitCov = curve_fit(fitFunc3,q, i,
+                                         p0=[1,0.0,0.2,20.0],sigma=err)
+                    (scale,off,phi,r) = correlated_values(fitParam,fitCov)
+                    scale = scale.nominal_value
+                    off = off.nominal_value
+                else:
+                    # only phi floats
+                    setR = params['strFact'][2]
+                    paramNo=3
+                    fitParam,fitCov = curve_fit(fitFunc5,q, i,
+                                         p0=[1,0.0,0.2],sigma=err)
+                    (scale, off, phi) = correlated_values(fitParam,fitCov)
+                    scale = scale.nominal_value
+                    off = off.nominal_value
+                    r = ufloat((setR,0))                                               
+            else:
+                # phi fixed
+                setPhi = params['strFact'][1]
+                if params['strFact'][2] == 0.0:
+                    # r floats
+                    paramNo=3
+                    fitParam,fitCov = curve_fit(fitFunc7,q, i,
+                                         p0=[1,0.0,20.0],sigma=err)
+                    (scale, off, r) = correlated_values(fitParam,fitCov)
+                    scale = scale.nominal_value
+                    off = off.nominal_value
+                    phi = ufloat((setPhi,0))
+                else:
+                    # neither phi nor r float
+                    setR = params['strFact'][2]
+                    paramNo=2
+                    fitParam,fitCov = curve_fit(fitFunc9,q, i,
+                                         p0=[1,0.0],sigma=err)
+                    scale = fitParam[0]
+                    off = fitParam[1]
+                    phi = ufloat((setPhi,0))
+                    r = ufloat((setR,0))                                            
+                            
+        # calculate predicted values for experimental qs and reduced Chi Squared
+        iPred=fitFunc3(q,scale, off, phi.nominal_value,r.nominal_value)
+        rChiSq = redChiSq(i, iPred, err, paramNo) 
+        
+        # calculate fit model 
+        fitModel[1]=fitFunc3(fitModel[0], 
+                            scale,off,phi.nominal_value,r.nominal_value)
+
+        fitParams = [rChiSq,scale,off,phi,r]
+
+    return fitParams, fitModel
+
+def fitDataLinComb(expData,modelDataA,modelDataB,params,wParams,qMinModel,qMaxModel):
+    global modelTckA, modelTckB, setFa
+
+    q = expData[0]
+    i = expData[1]
+    err = expData[2]
+
+    # make a copy of modelData to hold fit form of the model
+    # trim q values of fitModel to represent valid range after smearing
+    fitModel = [[],[]]
+    for j, qModel in enumerate(modelDataA[0]):
+        if (qMinModel <= qModel <= qMaxModel):
+            fitModel[0].append(qModel)
+    fitModel[0] = np.array(fitModel[0]) 
+       
+    # if beam profile type is 0, no smearing
+    beamProfType = wParams[0]            
+    if beamProfType == 0:
+        # unsmeared data, don't smear model
+        modelTckA = interpolate.splrep(modelDataA[0],modelDataA[1],s=0)
+        modelTckB = interpolate.splrep(modelDataB[0],modelDataB[1],s=0)
+    else:
+        # smeared experimental data, smear model. 
+        modelTckA = smearModelTck(modelDataA[0],modelDataA[1], wParams)            
+        modelTckB = smearModelTck(modelDataB[0],modelDataB[1], wParams)
+
+    if params['linComb'][1] == 0: 
+        # allow fraction model A to float
+        if params['bkgCorr'] == 0:
+            # no adjustable background offset
+            paramNo=2
+            fitParam,fitCov = curve_fit(fitFunc0_lc,q,i,p0=[1.0,0.5],sigma=err)
+            (scale,fA) = correlated_values(fitParam,fitCov)
+            scale = scale.nominal_value
+            off = 0.0                    
+            # scale and offset model intensities with fit values for plotting
+            fitModel[1]=fitFunc1_lc(fitModel[0], scale,fA.nominal_value,off)
+            # calculate pred intensities for each experimental q, to calculate chi^2
+            iPred = fitFunc0_lc(q,scale,fA.nominal_value)
+            rChiSq = redChiSq(i, iPred, err, paramNo)                
+            fitParams = [rChiSq,scale,off,fA,None]
+    
+        else:
+            # adjustable offset
+            paramNo=3
+            fitParam,fitCov = curve_fit(fitFunc1_lc,q,i,p0=[1.0,0.5,0.0],sigma=err)
+            (scale,fA,off) = correlated_values(fitParam,fitCov)
+            scale = scale.nominal_value
+            off = off.nominal_value
+            
+            # scale and offset model intensities with fit values for plotting
+            fitModel[1]=fitFunc1_lc(fitModel[0] ,scale,fA.nominal_value,off)
+            # calculate pred intensities for each experimental q, to calculate chi^2
+            iPred = fitFunc1_lc(q,scale,fA.nominal_value,off)
+            rChiSq = redChiSq(i, iPred, err, paramNo)                
+            fitParams = [rChiSq,scale,off,fA,None]
+     
+    else:
+        # use specified fraction model A
+        setFa = params['linComb'][1]                            
+        if params['bkgCorr'] == 0:
+            # no adjustable background offset
+            paramNo=1
+            fitParam,fitCov = curve_fit(fitFunc0_lcf,q,i,p0=[1.0],sigma=err)
+            scale = fitParam[0]
+            off = 0.0   
+                          
+            # scale and offset model intensities with fit values for plotting
+            fitModel[1]=fitFunc1_lcf(fitModel[0], scale)
+            # calculate pred intensities for each experimental q, to calculate chi^2
+            iPred = fitFunc0_lcf(q,scale,setFa)
+    
+        else:
+            # adjustable offset
+            paramNo=2
+            fitParam,fitCov = curve_fit(fitFunc1_lcf,q,i,p0=[1.0,0.0],sigma=err)
+            
+            scale = fitParam[0]
+            off = fitParam[1]
+            
+            # scale and offset model intensities with fit values for plotting
+            fitModel[1]=fitFunc1_lcf(fitModel[0] ,scale,off)
+            # calculate pred intensities for each experimental q, to calculate chi^2
+            iPred = fitFunc1_lcf(q,scale,off)
+                   
+        rChiSq = redChiSq(i, iPred, err, paramNo)                
+        fitParams = [rChiSq,scale,off,ufloat((setFa,0.0)),None]
+
+    return fitParams, fitModel
+    
+def fitFunc0(q,scale):
+    """Fitting function for single parameter fit.
+    Only parameter is scaling factor for the model"""
+    return scale*interpolate.splev(q,modelTck)
+    
+def fitFunc0_lc(q,scale,fA):
+    """Fitting function for linear combination of 2 models
+       with no offset. Parameters are scaling factor 
+       and fraction of model A"""
+    return scale*(fA*interpolate.splev(q,modelTckA) + (1-fA)*interpolate.splev(q,modelTckB))
+
+def fitFunc1_lc(q,scale,fA,offSet):
+    """Fitting function for linear combination of 2 models
+       with offset. Parameters are scaling factor,
+       fraction of model A and offset"""
+    return scale*(fA*interpolate.splev(q,modelTckA) + \
+        (1-fA)*interpolate.splev(q,modelTckB)) + offSet
+    
+def fitFunc0_lcf(q,scale):
+    """Fitting function for linear combination of 2 models, with fixed fraction
+       with no offset. Single parameter is scaling factor """
+    return scale*(setFa*interpolate.splev(q,modelTckA) + (1-setFa)*interpolate.splev(q,modelTckB))
+
+def fitFunc1_lcf(q,scale,offSet):
+    """Fitting function for linear combination of 2 models, with fixded fraction
+       with offset. Parameters are scaling factor and offset"""
+    return scale*(setFa*interpolate.splev(q,modelTckA) + \
+        (1-setFa)*interpolate.splev(q,modelTckB)) + offSet
+        
+def fitFunc1(q,scale,offSet):
+    """Fitting function for 2-parameter fit.
+    Parameters are scaling factor and offset of experimental data."""
+    return scale*interpolate.splev(q,modelTck) + offSet
+    
+def fitFunc2(q,scale,phi,r):
+    """Fitting function incorporating structure factor for
+    a solution of hard spheres.  Parameters are scaling factor for model,
+    volume fraction of hard spheres and radius of spheres
+    No adjustable offset"""    
+    # first multiply model intensities by the structure factor
+    modelI = []
+    for i,qModel in enumerate(modelData_i[0]):
+        modelI.append(modelData_i[1][i]*sx.hsStructFact(qModel,phi,r))
+    modelI = np.array(modelI)
+    # calculate cubic spline for the new model
+    tckUnsm = interpolate.splrep(modelData_i[0],modelI,s=0)
+    if smearParams[0][0] == 0:
+        #no smearing
+        value = interpolate.splev(q,tckUnsm)
+    else:     
+        # smear the value at q - use parameters in global list variable smearParams    
+        value = sx.smearPt(q,tckUnsm,smearParams[0],smearParams[2],smearParams[1])/smearParams[3]
+    return value*scale
+
+def fitFunc3(q,scale,offSet,phi,r):
+    """Fitting function incorporating structure factor for
+    a solution of hard spheres.  Parameters are scaling factor for model,
+    offset of experimental data, volume fraction of hard spheres and
+    radius of spheres"""    
+    # first multiply model intensities by the structure factor
+    modelI = []
+    for i,qModel in enumerate(modelData_i[0]):
+        modelI.append(modelData_i[1][i]*sx.hsStructFact(qModel,phi,r))
+    modelI = np.array(modelI)
+    # calculate cubic spline for the new model
+    tckUnsm = interpolate.splrep(modelData_i[0],modelI,s=0)    
+    if smearParams[0][0] == 0:
+        #no smearing
+        value = interpolate.splev(q,tckUnsm)
+    else:     
+        # smear the value at q - use parameters in global list variable smearParams    
+        value = sx.smearPt(q,tckUnsm,smearParams[0],smearParams[2],smearParams[1])/smearParams[3]
+    return value*scale + offSet
+
+
+def fitFunc4(q,scale,phi):
+    """Fitting function incorporating structure factor for
+    a solution of hard spheres.  Parameters are scaling factor for model,
+    and volume fraction of hard spheres
+    No adjustable offset. Radius of spheres set by user"""    
+    # first multiply model intensities by the structure factor
+    modelI = []
+    for i,qModel in enumerate(modelData_i[0]):
+        modelI.append(modelData_i[1][i]*sx.hsStructFact(qModel,phi,setR))
+    modelI = np.array(modelI)
+    # calculate cubic spline for the new model
+    tckUnsm = interpolate.splrep(modelData_i[0],modelI,s=0)    
+    if smearParams[0][0] == 0:
+        #no smearing
+        value = interpolate.splev(q,tckUnsm)
+    else:     
+        # smear the value at q - use parameters in global list variable smearParams    
+        value = sx.smearPt(q,tckUnsm,smearParams[0],smearParams[2],smearParams[1])/smearParams[3]
+    return value*scale
+
+def fitFunc5(q,scale,offSet,phi):
+    """Fitting function incorporating structure factor for
+    a solution of hard spheres.  Parameters are scaling factor for model,
+    offset of experimental data, volume fraction of hard spheres.
+    radius of spheres set by user"""    
+    # first multiply model intensities by the structure factor
+    modelI = []
+    for i,qModel in enumerate(modelData_i[0]):
+        modelI.append(modelData_i[1][i]*sx.hsStructFact(qModel,phi,setR))
+    modelI = np.array(modelI)
+    # calculate cubic spline for the new model
+    tckUnsm = interpolate.splrep(modelData_i[0],modelI,s=0)    
+    if smearParams[0][0] == 0:
+        #no smearing
+        value = interpolate.splev(q,tckUnsm)
+    else:     
+        # smear the value at q - use parameters in global list variable smearParams    
+        value = sx.smearPt(q,tckUnsm,smearParams[0],smearParams[2],smearParams[1])/smearParams[3]
+    return value*scale + offSet
+
+def fitFunc6(q,scale,r):
+    """Fitting function incorporating structure factor for
+    a solution of hard spheres.  Parameters are scaling factor for model,
+    and radius of hard spheres
+    No adjustable offset. volume fraction of spheres set by user"""    
+    # first multiply model intensities by the structure factor
+    modelI = []
+    for i,qModel in enumerate(modelData_i[0]):
+        modelI.append(modelData_i[1][i]*sx.hsStructFact(qModel,setPhi,r))
+    modelI = np.array(modelI)
+    # calculate cubic spline for the new model
+    tckUnsm = interpolate.splrep(modelData_i[0],modelI,s=0)    
+    if smearParams[0][0] == 0:
+        #no smearing
+        value = interpolate.splev(q,tckUnsm)
+    else:     
+        # smear the value at q - use parameters in global list variable smearParams    
+        value = sx.smearPt(q,tckUnsm,smearParams[0],smearParams[2],smearParams[1])/smearParams[3]
+    return value*scale
+
+
+def fitFunc7(q,scale,offSet,r):
+    """Fitting function incorporating structure factor for
+    a solution of hard spheres.  Parameters are scaling factor for model,
+    offset of experimental data, radius of hard spheres.
+    Volume fraction of spheres set by user"""    
+    # first multiply model intensities by the structure factor
+    modelI = []
+    for i,qModel in enumerate(modelData_i[0]):
+        modelI.append(modelData_i[1][i]*sx.hsStructFact(qModel,setPhi,r))
+    modelI = np.array(modelI)
+    # calculate cubic spline for the new model
+    tckUnsm = interpolate.splrep(modelData_i[0],modelI,s=0)    
+    if smearParams[0][0] == 0:
+        #no smearing
+        value = interpolate.splev(q,tckUnsm)
+    else:     
+        # smear the value at q - use parameters in global list variable smearParams    
+        value = sx.smearPt(q,tckUnsm,smearParams[0],smearParams[2],smearParams[1])/smearParams[3]
+    return value*scale + offSet
+
+def fitFunc8(q,scale):
+    """Fitting function incorporating structure factor for
+    a solution of hard spheres.  Only parameter is scaling factor for model.
+    Volume fraction and radius for sphere are set by user.
+    No adjustable offset"""    
+    # first multiply model intensities by the structure factor
+    modelI = []
+    for i,qModel in enumerate(modelData_i[0]):
+        modelI.append(modelData_i[1][i]*sx.hsStructFact(qModel,setPhi,setR))
+    modelI = np.array(modelI)
+    # calculate cubic spline for the new model
+    tckUnsm = interpolate.splrep(modelData_i[0],modelI,s=0)    
+    if smearParams[0][0] == 0:
+        #no smearing
+        value = interpolate.splev(q,tckUnsm)
+    else:     
+        # smear the value at q - use parameters in global list variable smearParams    
+        value = sx.smearPt(q,tckUnsm,smearParams[0],smearParams[2],smearParams[1])/smearParams[3]
+    return value*scale
+
+def fitFunc9(q,scale,offSet):
+    """Fitting function incorporating structure factor for
+    a solution of hard spheres.  
+    Only parameters are scaling factor for model and offset.
+    Volume fraction and radius for sphere are set by user."""    
+    # first multiply model intensities by the structure factor
+    modelI = []
+    for i,qModel in enumerate(modelData_i[0]):
+        modelI.append(modelData_i[1][i]*sx.hsStructFact(qModel,setPhi,setR))
+    modelI = np.array(modelI)
+    # calculate cubic spline for the new model
+    tckUnsm = interpolate.splrep(modelData_i[0],modelI,s=0)    
+    if smearParams[0][0] == 0:
+        #no smearing
+        value = interpolate.splev(q,tckUnsm)
+    else:     
+        # smear the value at q - use parameters in global list variable smearParams    
+        value = sx.smearPt(q,tckUnsm,smearParams[0],smearParams[2],smearParams[1])/smearParams[3]
+    return value*scale + offSet
+    
+
+
+
+def redChiSq(yExp,yPred,err,paramNo):
+    chiSq = np.ma.sum(((yExp-yPred)/err)**2)
+    nu = len(yExp)-paramNo
+    rChiSq = chiSq/nu
+    return float(rChiSq)
+    
+
+def plotData(params,expData, modelData, fitResults, expDataFileName,qUnits,absI):    
+
+    """Plots experimental and best-fit model data in form specified by the 
+    plotType parameter. If more than one model are specified, also makes a plot
+    comparing the reduced chi^2 values obtained with the different models."""    
+
+    plotData=[expData]
+    legends = ['Experimental Data']
+    chiSq = sorted(fitResults.keys())   
+
+    # create data subsets for fit models over the fitting range
+    for chiSqVal in chiSq[0:params['plotModelsN']]:
+    	
+        modelNo = fitResults[chiSqVal][0]
+        scale = fitResults[chiSqVal][1]
+        offset = fitResults[chiSqVal][2]
+        if params['linComb'][0]==1:
+            fA = fitResults[chiSqVal][3]
+            phi = None
+            r = None
+        else:
+            phi = fitResults[chiSqVal][3]
+            r = fitResults[chiSqVal][4]
+            fA = None
+
+        modelQ = modelData[1][modelNo]
+        modelI = modelData[2][modelNo]
+        fitModelQ = []
+        fitModelI = []
+        for i in range(len(modelQ)):
+            if (params['qMin'] <= modelQ[i] <= params['qMax']):
+                fitModelQ.append(modelQ[i])
+                fitModelI.append(modelI[i])
+        fitModelQ=np.array(fitModelQ)
+        fitModelI=np.array(fitModelI)
+        plotData.append([modelQ,modelI])
+        plotData.append([fitModelQ,fitModelI])
+
+        # construct legends with fitting results
+        legends.append('')
+        
+        chiSqStr = ": $\chi^2 =$ %4.2f" % (chiSqVal)
+        scaleStr = "\nscale fact = %6.2E" % (scale)
+        if params['bkgCorr'] == 1:
+            offsetStr = ", offset = %6.2E" % (offset)
+        else:
+            offsetStr = ''
+                        
+        if params['strFact'][0]==1:
+            strFactStr = '\n Hard-sphere structure factor parameters:\n'
+            if params['strFact'][1]==0:
+                strFactStr += '$\phi = $ %6.3f $\pm$ %6.4f \n' %(phi.nominal_value, phi.std_dev())
+            else:
+                strFactStr += '$\phi = $ %4.3f (fixed) \n' %(phi.nominal_value)
+            if params['strFact'][2]==0:
+                strFactStr += '$r = $ %4.2f $\pm$ %6.3f ' %(r.nominal_value, r.std_dev())
+            else:
+                strFactStr += '$r = $ %4.2f (fixed) ' %(r.nominal_value)
+            legends.append(modelData[0][modelNo]+chiSqStr + scaleStr + 
+                            offsetStr + strFactStr)
+
+        elif params['linComb'][0]==1:
+            modelNames = modelData[0][0].split()
+            linCombStr = '\nLinear combination of ' + modelNames[0]
+            linCombStr += ' and ' + modelNames[1] 
+            linCombStr += '\nFraction of ' + modelNames[0] + ' = '
+            if params['linComb'][1]==0:
+                linCombStr += '%6.3f $\pm$ %6.4f \n' %(fA.nominal_value, fA.std_dev())
+            else:
+                linCombStr += '%6.3f  (fixed)\n' %(fA.nominal_value)
+            legends.append(linCombStr +chiSqStr + scaleStr + offsetStr)
+
+        else:
+            legends.append(modelData[0][modelNo]+chiSqStr + scaleStr + offsetStr)
+            
+ 
+ 
+ 
+    if len(chiSq) == 1:
+        figSize = (8,4)
+        plotPos = 111       
+    else:
+        figSize = (8,8)
+        plotPos = 211
+
+    fig = plt.figure(figsize=figSize)
+
+    ax1 = sx.saxsPlot(fig,plotPos,params['plotParam'],plotData,legends=legends,
+            colors=['k','b','r','b','g','b','m','b','c'],qUnits=qUnits,absI=absI) 
+        
+    ax1.set_title(expDataFileName)     
+
+    # Make bar graph of chiSq values
+        
+    if len(chiSq) > 1:
+        modelNos =[]
+        modelNames = []
+        for value in chiSq:
+            modelNo = fitResults[value][0]
+            modelNos.append(float(modelNo)) 
+            modelNames.append(modelData[0][modelNo])
+        modelNos = np.array(modelNos)
+        ax2=fig.add_subplot(212)
+        
+        ax2.set_xlim(-0.25,len(chiSq)-.25)
+        ax2.bar(modelNos, chiSq, 0.5)
+                
+        ax2.xaxis.set_ticklabels(modelNames)
+        ax2.xaxis.set_major_locator(ticker.FixedLocator(modelNos + 0.2))
+        ax2.set_xlabel('Model')
+        ax2.set_ylabel('Reduced $\chi^2$')
+
+    return fig
+
+def plotSmearFuncs(wParams):
+    # calculate maximum x and y values for weighting functions
+    eps = 0.01
+    wym =  sx.wYmax(wParams,eps)
+        
+    wxm = sx.wXmax(wParams[3],eps)
+
+    fig = plt.figure(figsize=(6,6))
+    plt.subplots_adjust(hspace=0.2)      
+    
+    plotPos = 210
+    if wym>0:
+        plotPos +=1
+        ax1=sx.plotBeamLengthProfile(fig,plotPos,wParams,wym)
+    
+    if wxm>0:
+        plotPos +=1
+        ax2=sx.plotBeamWidthProfile(fig,plotPos,wParams,wxm,wym)
+        
+    return fig
+    
+def plotUnsmModel(params,modelData,fitResults,qUnits):
+    
+    chiSq = sorted(fitResults.keys())
+    bestModelNo = fitResults[chiSq[0]][0]
+    scale = fitResults[chiSq[0]][1]
+
+   
+    if fitResults[chiSq[0]][3] != None:
+        phi = fitResults[chiSq[0]][3].nominal_value
+    else:
+        phi = 0
+    if fitResults[chiSq[0]][4] != None:
+        r = fitResults[chiSq[0]][4].nominal_value
+    else:
+        r = 0
+
+ 
+    q = modelData[1][bestModelNo]
+
+    formFact = modelData[2][bestModelNo]*scale
+    strFact = sx.hsStructFact(q,phi,r)
+    product = formFact*strFact
+    fig = plt.figure(figsize=(8,4))
+    plotPos = 111
+    
+    legends=['Form factor: ' + modelData[0][bestModelNo],'Form Factor * Structure Factor']
+    ax1 = sx.saxsPlot(fig,plotPos,params['plotParam'],[[q,formFact],[q,product]],legends=legends,
+            colors = ['k','b'],qUnits=qUnits) 
+
+    ax1.set_title('Unsmeared Model Form and Structure Factors')
+        
+    ax2 = ax1.twinx()
+    
+    strFactLeg = 'Structure Factor'
+    
+    if params['strFact'][0]==1:
+        strFactStr = '\n Hard-sphere structure factor parameters:\n'
+        strFactStr += '$\phi = $ %4.2f \n' %(phi)
+        strFactStr += '$r = $ %4.2f ' %(r)
+        strFactLeg += strFactStr
+        
+    ax2.plot(q,strFact,'r',label=strFactLeg)
+
+    
+    ax2leg=ax2.legend(loc= 'upper right', bbox_to_anchor=(1,0.6))
+    
+    ax2leg.get_texts()
+    for t in ax2leg.get_texts():
+        t.set_fontsize('small')    # the legend text fontsize
+    
+    
+    ax1.set_ylabel('Form Factor')
+    ax2.set_ylabel('Structure Factor')
+    
+def writeResults(outFileName,expDataFileName, modelFileName,expData,
+                    modelData,params,wParams,fitConsts):
+    """Writes output file with experimental data and fit models, along with header information"""
+
+
+    if outFileName != None:
+        outFile = open(outFileName,'w')
+    else: 
+        outFile = None
+    if expDataFileName == None:
+        expDataFileName = 'Standard Input'
+
+
+    timeFormat = '%a, %d %b %Y, %I:%M %p'
+    
+    lengths = [len(expData[0])]
+    maxLength = lengths[0]
+    for i in range(len(modelData[0])):
+        thisLength = len(modelData[1][i])
+        lengths.append(thisLength)
+        if thisLength > maxLength:
+            maxLength = thisLength
+    
+    print >> outFile, "# Fit of experimental SAXS data to model data"
+    print >> outFile, "# " + time.strftime(timeFormat)  + "\n#"
+    print >> outFile, "# Data file: " + expDataFileName
+    print >> outFile, "# Model file: " + modelFileName
+    print >> outFile, "# Q-range for fitting: " + str(params['qMin']) + "--" + str(params['qMax'])
+    print >> outFile, "# Beam-length smearing profile: ",
+    if wParams[0]==0:
+        print >> outFile, "None"
+    elif wParams[0]== "sig":
+        print >> outFile, "Sigmoidal; a = " + str(wParams[1]) + " ; b = " + str(wParams[2])
+    elif wParams[0] == "trap":
+        print >> outFile, "Trapezoidal; a = " + str(wParams[1]) + " ; b = " + str(wParams[2])
+    print >> outFile, "# Detector slit length = " + str(wParams[4])
+    print >> outFile, "# Beam half-width = " + str(wParams[3])
+    print >> outFile, "#"
+    
+    if params['bkgCorr'] == 1:
+        print >> outFile, '# Background intensity allowed to float \n#'
+    else:
+        print >> outFile, '# Background intensity fixed at 0 \n#'
+    if params['strFact'][0] ==1:
+        print >> outFile, '# Hard-sphere structure factor incorporated \n#'
+
+    if params['linComb'][0]==1:
+        modelNames = modelData[0][0].split()
+        print >> outFile, '# Data fit to a linear combination of two models: ',
+        print >> outFile,  modelNames[0] + ' and ' + modelNames[1] +'\n#'   
+        print >> outFile, "# Red Chi^2 ",
+    else:
+        print >> outFile, "# Red Chi^2 ",
+    print >> outFile, "\tScale    \tBkgd offset", 
+    if params['strFact'][0]==1:
+        print >> outFile, " \tStruct fact phi \tStruct fact r",  
+    if params['linComb'][0]==1:
+        print >> outFile, " \tFraction " + modelNames[0],  
+    print >> outFile, ""
+        
+    for i, name in enumerate(modelData[0]):
+        chiSq = fitConsts[i][0]
+        scale = fitConsts[i][1]
+        off = fitConsts[i][2]
+        if params['strFact'][0]==1:
+            phi = fitConsts[i][3]
+            r = fitConsts[i][4]
+        if params['linComb'][0]==1:
+            fA = fitConsts[i][3]
+            
+        if params['linComb'][0]==1:
+            string =  "# %-8.3g " % (chiSq)
+        else:
+            string = "# " + name +"\t%-8.3g " % (chiSq)
+        string += "\t%-8.3g " % (scale)
+        string += "\t%-8.3g " % (off)
+        if params['linComb'][0]==1:
+            if params['linComb'][1]==0:
+                string += '\t%-4.3f +/- %6.4f  ' %(fA.nominal_value, fA.std_dev())
+            else:
+                string += "\t%-4.3f (fixed)    " % (fA.nominal_value)
+        if params['strFact'][0]==1:
+            if params['strFact'][1] == 0:
+                string += '\t%-4.3f +/- %6.4f  ' %(phi.nominal_value, phi.std_dev())
+            else:
+                string += "\t%-4.3f (fixed)    " % (phi.nominal_value)
+            if params['strFact'][2] == 0:
+                string += '\t%-4.3f +/- %6.3f' %(r.nominal_value, r.std_dev())
+            else:
+                string += "\t%-4.2f (fixed)      " % (r.nominal_value)
+                
+        print >> outFile, string
+    print >> outFile, "#"
+    
+    print >> outFile, "%-11s\t%-11s\t%-11s" % ('q_exp', 'I_exp', 'Error'),
+    if params['linComb'][0]==1:
+        print >> outFile, "\t%-11s\t%-11s" % ('q_model','I_model')
+    else:   
+        for name in modelData[0]:
+            qName= "q_" + name
+            iName= "I_" + name
+            print >> outFile, "\t%-11s\t%-11s" % (qName,iName),
+        print >> outFile, ""
+    
+    for i in range(maxLength):
+        if i < lengths[0]:
+            print >> outFile, "%-11.4E\t%-11.4E\t%-11.4E" \
+                                % (expData[0][i], expData[1][i], expData[2][i]),
+        for j in range(len(modelData[0])):
+            if i < lengths[j+1]:
+                print >> outFile, "\t%-11.4E\t%-11.4E" % (modelData[1][j][i], modelData[2][j][i]),
+        print >> outFile, ""
+        
+                    
+
+if __name__=="__main__":
+    main()

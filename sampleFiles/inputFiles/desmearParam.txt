@@ -1,0 +1,19 @@
+# SAXS desmearing parameters
+4				# desmearing iterations
+15				# smoothing window for intermediate results (odd integer)
+1 				# smoothing window for result of last iteration (odd integer)
+0.02			# q min for desmearing
+0.4				# q max for desmearing
+0.001			# delta q for desmeared curve
+n				# include beam width correction: 'y' or 'n'
+#	Plot limits
+0.0				# q min for plotting
+0.6				# q max for plotting
+1E-4			# i min for plotting
+1 				# i max for plotting
+#	Plot options
+log				# plot type: "linear", "log", "loglog", "guinier" or "kratky"
+n				# plot smear functions: 'y' or 'n'
+y				# Show plots (on screen): 'y' or 'n'
+n				# Save plots: 'y' or 'n'
+pdf				# Image format for plots:  'emf', 'eps', 'pdf', 'png', 'ps', 'raw', 'rgba', 'svg', 'svgz' 

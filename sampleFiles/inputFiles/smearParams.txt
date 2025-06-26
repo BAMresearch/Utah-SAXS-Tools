@@ -1,0 +1,17 @@
+#  Parameter file for saxsSmear.py
+#  Created Thu, 14 Jul 2011 by saxsSmear.py in interactive mode
+t		 # beam-length profile type: 't' trapezoidal or 's' sigmoidal
+0.4		 # beam-length parameter a
+0.3		 # beam-length parameter b
+0.01		 # half-width of Gaussian beam-width profile
+0.1		 # detector slit length
+#	Plot limits (limits are ignored if max is not greater than min)
+0.0 		 # q min for plotting
+0.0 		 # q max for plotting
+0.0 		 # I min for plotting
+0.0 		 # I max for plotting
+#	Plot output options
+log 		 # plot type: 'linear', 'log', 'loglog', 'guinier' or 'kratky'
+y		 # Show plots (on screen): 'y' or 'n'
+y		 # Save plots  'y' or 'n'
+pdf		 # Image format for plots: 'emf', 'eps', 'pdf', 'png', 'ps', 'raw', 'rgba', 'svg', 'svgz' 

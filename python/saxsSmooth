@@ -1,0 +1,164 @@
+#! /Library/Frameworks/Python.framework/Versions/Current/bin/python
+
+#   A Python script to apply a smoothing function to a saxs profile
+
+#  (c) 2009-2011 by David P. Goldenberg
+#  Please send feature requests, bug reports, or feedback to this address:
+#           Department of Biology
+#           University of Utah
+#           257 South 1400 East
+#           Salt Lake City, UT
+#     
+#           goldenberg@biology.utah.edu
+#     
+#  This software is distributed under the conditions of the BSD license.
+#  Please see the documentation for further details.
+    
+import sys
+
+from optparse import OptionParser
+import numpy as np 
+import matplotlib.pyplot as plt
+
+import saxs as sx
+
+info = """ saxsSmooth
+      A Python script to apply a smoothing function to a saxs profile
+      The program requires one input argument, the name of the data file.
+      Options:
+      -i, --info                      Show more help information.
+      -r, --raw                       Raw input file. Default is pdh format
+      --so                        Direct output to system standard output
+                                      `avg (average). Default is sqrt.
+      -w WIN, --wsize=WIN             Smoothing window length. Default = 5
+      --wtype=WINTYPE                 Smoothing window type. Options are 'flat', 'hanning',
+                                      'hamming', 'bartlett', and 'blackman'. Default is 
+                                       hanning.
+      -t PLOTTYPE, --plot=PLOTTYPE    Plot type. Options are none, linear, log, loglog,
+                                          guinier, kratky
+    
+      The smoothed profile is directed to a new file, 
+      or to standard output if the -s (--stin) or --so option is chosen.
+      The default behavior is to assume the data file is in PDH format.
+      If the -r (--raw) optionis used, the program assumes the files 
+      are in a "raw" format and only looks for rows containing exactly three fields.
+    
+      The script smooths the input file by convolution with a windowing function.
+      The smoothing code is from: http://www.scipy.org/Cookbook/SignalSmooth
+      There are two options for smoothing: 
+          The window length (i.e. the number of points that are averaged)
+          The window function.  Several options are available, 
+          but the effects are probably not very different.
+          See http://www.scipy.org/Cookbook/SignalSmooth for more information
+      By default the input and smoothed profiles are plotted, with the
+      usual options for plot types.
+ 
+  """
+
+
+def main():
+    ##### Parse options and arguments   ##########
+    parser = OptionParser()
+    
+    parser.add_option("-i", "--info", action="store_true", dest="showInfo", default=False,
+                        help ="Show more help information.")
+    parser.add_option("-r", "--raw", action = "store_true", dest="rawFile", default = False, 
+                       help="Raw input file. Default is pdh format")
+    parser.add_option("-s", "--si", action = "store_true", dest="stdin", default = False, 
+                help="Read data from system standard input and write to standard output")                                                
+    parser.add_option("--so", action = "store_true", dest="stdo", default = False, 
+                       help="Direct output to system standard output")                       
+    parser.add_option("-w", "--wsize", action = "store", type = "int", 
+                   dest="win", default = "5", 
+                   help="Smoothing window length. Default = 5")
+    parser.add_option("--wtype", action = "store", type = "string", 
+                       dest="winType", default = "hanning", 
+                       help="Smoothing window type. Options are 'flat',"\
+                        + " 'hanning', 'hamming', 'bartlett', and 'blackman' ")    
+    parser.add_option("-t", "--plot", action = "store", type = "string", 
+                       dest="plotType", default = "linear", 
+                       help="Plot type. Options are none, linear, log, "\
+                            + "loglog, guinier, kratky. Default is linear")    
+
+
+    (options, args) = parser.parse_args()
+
+    if options.showInfo:
+        sys.exit(info)
+
+    message = '\n saxsSmooth.py: A python script to apply a '\
+                + 'smoothing function to a SAXS profile.  \n' \
+                + ' For help, type > saxsSmooth.py -i'
+
+
+    fileNames = sx.fileNamer(options,args,1, 'smth')
+    if fileNames == None:
+        sys.exit(message)
+    else:
+        inFileName = fileNames[1]
+        outFileName = fileNames[2]
+    
+	###### Window Title
+	if inFileName == None:
+		windowTitle = 'SAXS Smoothed Data'
+	else:   
+		windowTitle = 'SAXS Smoothed Data: ' + inFileName
+    
+    ###### Read input data
+        
+    if options.rawFile:
+        data = sx.readQIE(inFileName)
+    else:
+        header, data = sx.readPdh(inFileName)
+        data =np.array(data)
+    
+    ###### Smoothing calculation
+    smoothI = sx.smooth(data[1],window_len=options.win, window=options.winType)
+    smoothErr = sx.smooth(data[2],window_len=options.win, window=options.winType)
+    
+    smData = [data[0],smoothI, smoothErr]
+
+    
+    #### Plots   
+    if options.plotType != 'none':
+        plotParam = [options.plotType,0,0]
+        if options.rawFile:
+            qUnits=0
+            absI = False
+        else:
+            qUnits = header[4][4]          
+            if header[2][2] == 1:
+                absI = True
+            else:
+                absI = False
+            
+            
+        smLegend = 'Smoothed Data \n window size = '\
+                    + str(options.win) + '\n window type = ' + options.winType
+        
+        fig = plt.figure()
+        plotPos = 211
+        ax1 = sx.saxsPlot(fig,plotPos, plotParam, [data],
+                            legends=['Input Data'], qUnits=qUnits,absI=absI)
+        plotPos=212
+        ax2 = sx.saxsPlot(fig,plotPos, plotParam, [smData],
+                            legends=[smLegend], qUnits=qUnits,absI=absI)
+                            
+        fig.canvas.set_window_title(windowTitle)                     
+        fig.subplots_adjust(bottom=0.1, hspace=0.25) 
+        plt.show()
+    
+    
+    
+    
+    ##### write binned data to output file
+    if options.rawFile:
+        sx.writeQIE(outFileName,smData)
+    else:
+        sx.writePdh(outFileName, header,smData)
+
+    
+if __name__=="__main__":
+    main()
+
+

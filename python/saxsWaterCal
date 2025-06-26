@@ -1,0 +1,266 @@
+#! /Library/Frameworks/Python.framework/Versions/Current/bin/python
+
+#   A Python script to determine scattering intensity from a water reference sample
+
+#  (c) 2009-2011 by David P. Goldenberg
+#  Please send feature requests, bug reports, or feedback to this address:
+#           Department of Biology
+#           University of Utah
+#           257 South 1400 East
+#           Salt Lake City, UT
+#     
+#           goldenberg@biology.utah.edu
+#     
+#  This software is distributed under the conditions of the BSD license.
+#  Please see the documentation for further details.
+
+import sys
+from optparse import OptionParser
+
+import numpy as np 
+import matplotlib.pyplot as plt
+import saxs as sx
+import soln
+from uncertainties import unumpy, ufloat
+
+
+info = """  saxsWaterCal: 
+    A Python script to determine calibration factor for calculating absolute scattering 
+    intensities (the macroscopic differential scattering cross section) from a scattering
+    measurement of liquid water.
+    
+    Options:
+      -h, --help            show this help message and exit
+      -i, --info            Show additional information and exit
+      -r, --raw             Raw input file. Default is pdh format
+      -s, --si              Read data from system standard input
+      -t PLOTTYPE, --plot=PLOTTYPE
+                            Plot type. Options are none, linear, log,
+                            loglog,guinier, kratky. Default is linear
+      --qMin=AVGQMIN        Minimum q-value for calculating average intensity
+      --qMax=AVGQMAX        Maximum q-value for calculating average intensity
+      --temp=TEMP           Tempertature of water sample, in degrees Celsius, used
+                            to calculate calibration factor
+
+    This program is specifically intended for data from the Anton-Paar SAXSess instrument,
+    which includes an attenuated beam profile.  The peak at q=0 is used to align 
+    the water and empty-cell profiles and to normalize the scattering intensities.
+    
+    The program requires two input arguments, the names of the  empty-cell and water files
+    
+    The default behavior is to assume the data files are in PDH format
+    If the option -r is used, the program assumes the files 
+    are in a "raw" format and only looks for rows containing exactly three fields,
+    and that the lask character of the first field is a digit.
+    Executing the program with the argument "-i", prints this information.
+    Executing the program with no arguments prints a short message.
+     
+    After reading the data files, the program first trims both of them to a 
+    common length and range of q-values.  
+    The two files must use the same q-value intervals.
+    
+    The normalized empty-cell profile is subtracted from the normalized water profile, and
+    an average is calculated over a defined q-range.  The default q-range is 0.05 to 0.2 A-1,
+    but the minimum and maximum values can be set with the --qMin and --qMax options.
+    
+    The calibration factor is calculated by dividing the average intensity difference by the
+    theoretical macroscopic differential scattering cross section of water, calculated from
+    the density and isothermal compressibility.  By default, the water temperature is
+    assumed to be 20 C, but other values between 0 and 100 C can be specified with the
+    --temp option.
+    
+    The calibration factor contains implicit information about the beam geometry, 
+    the attenuation by the beam stop and the cell dimensions.  It is only valid when 
+    applied to data recorded under the same experimental conditions and normalized
+    in the same way.
+        
+    Plots of the original and difference profiles are automatically generated
+    using the matplotlib python library.  
+    
+    Errors are calculated using the Python uncertainties package.
+    
+    """
+    
+
+def main():
+    ###### Handle arguments and options with the optparse module
+    parser = OptionParser()
+    
+    parser.add_option("-i", "--info", action = "store_true", 
+                   dest="info", default = False, 
+                   help="Show additional information and exit")    
+    parser.add_option("-r", "--raw", action = "store_true", dest="rawFile", default = False, 
+                       help="Raw input file. Default is pdh format")
+    parser.add_option("-s", "--si", action = "store_true", dest="stdin", default = False, 
+                help="Read data from system standard input")  
+    parser.add_option("-t", "--plot", action = "store", type = "string", 
+                       dest="plotType", default = "linear", 
+                       help="Plot type. Options are none, linear, log, loglog,"
+                             + "guinier, kratky. Default is linear")
+    parser.add_option("--qMin", action = "store", type = "float",
+                        dest="avgQmin", default = 0.05,
+                        help = "Minimum q-value for calculating average intensity")
+
+    parser.add_option("--qMax", action = "store", type = "float",
+                    dest="avgQmax", default = 0.2,
+                    help = "Maximum q-value for calculating average intensity")
+                    
+    parser.add_option("--temp", action = "store", dest="temp", default = 20.0, type=float, 
+                       help="Temperature of water sample, "+
+                            "in degrees Celsius, used to calculate calibration factor")
+                    
+              
+    (options, args) = parser.parse_args()
+
+    ######## Check temperature for water calibration   #############
+    if (options.temp < 0.0 or options.temp >100):
+        options.temp = tempPrompt(options.temp)
+    
+    if (options.info):
+        sys.exit(info)
+        
+    message = '\n saxsWaterCal: A python script to calculate '\
+                + 'the scattering intensity from a water refence sample. '\
+                + '\n For more information, type > saxsWaterCal -i'
+
+    if options.stdin:
+        if len(args) != 1:
+            sys.exit(message)
+        sampleFileName = None
+    else:
+        if len(args)!=2:
+            sys.exit(message)
+        sampleFileName = args[1]
+            
+    refFileName =args[0]
+    ###### Window Title
+    if sampleFileName == None:
+        windowTitle = 'SAXS Water Profile'
+    else:   
+        windowTitle = 'SAXS Water Profile: ' + sampleFileName + ' - ' + refFileName
+
+    ###### Read input data
+    if options.rawFile:
+        sampleData = sx.readQIE(sampleFileName)
+        refData = sx.readQIE(refFileName)
+    else:
+        sampleHeader, sampleData = sx.readPdh(sampleFileName)
+        refHeader, refData = sx.readPdh(refFileName)
+        if sampleFileName != None:
+            sampleHeader[0] += "    Sample file: " + sampleFileName \
+                            + ", Reference file: " + refFileName
+        
+    ##### Check spacing of q values in the two files
+    deltaQsample = sampleData[0][1]-sampleData[0][0]
+    deltaQref = refData[0][1] - refData[0][0]
+    deltaDelta = abs(deltaQsample-deltaQref)
+    if deltaDelta > 1e-5:
+        message = """\nThe sample and reference files do not appear to have the same spacing of q-values"""
+        sys.exit(message)
+
+    ##### Find common range of q values in two data sets
+    qMin = max(sampleData[0][0],refData[0][0])
+    qMax = min(sampleData[0][-1],refData[0][-1])
+
+
+    ##### Trim data sets to common length    
+    sampleDataTrim = [[],[],[]]
+    for i, q in enumerate(sampleData[0]):
+        if (qMin <= q <= qMax):
+            sampleDataTrim[0].append(sampleData[0][i])
+            sampleDataTrim[1].append(sampleData[1][i])
+            sampleDataTrim[2].append(sampleData[2][i])
+    
+    refDataTrim = [[],[],[]]
+    for i, q in enumerate(refData[0]):
+        if (qMin <= q <= qMax):
+            refDataTrim[0].append(refData[0][i])
+            refDataTrim[1].append(refData[1][i])
+            refDataTrim[2].append(refData[2][i])
+
+    ##### Convert data into numpy arrays     
+    refData = np.array(refDataTrim)
+    sampleData = np.array(sampleDataTrim)
+
+    ##### Normalize sample and reference data by beam peak intensities
+    sampleData = normalData(sampleDataTrim)
+    refData = normalData(refDataTrim)
+    
+    
+    ######## Create unumpy arrays with uncertainties
+    
+    sampleIu = unumpy.uarray((sampleData[1],sampleData[2]))
+    refIu = unumpy.uarray((refData[1],refData[2]))
+    
+    ######### Subtract empty-cell data
+    diffIu = sampleIu - refIu
+    
+    difData = [sampleData[0], unumpy.nominal_values(diffIu), unumpy.std_devs(diffIu)]
+    
+    ######### Calculate average intensity over defined q-range  ###############
+    total = ufloat((0,0))
+    n = 0
+    for i, q in enumerate(difData[0]):
+
+        if (options.avgQmin <= q <= options.avgQmax):
+            total += diffIu[i]
+            n +=1
+    iAvg = total/n
+    CF = iAvg/soln.h2oI0(options.temp)
+    print CF
+
+    ######### Plot data
+    if options.plotType != 'none':
+        
+        cfNom = CF.nominal_value
+        cfErr = CF.std_dev()
+        iAvgNom = iAvg.nominal_value
+        iAvgErr = iAvg.std_dev()
+        
+        fitAvg = [[options.avgQmin, options.avgQmax],[iAvgNom, iAvgNom]]
+        cfString = 'Calibration factor = %(nom)4.4g +/- %(sd)4.2g cm' % {'nom':cfNom, 'sd':cfErr}
+
+        fig = plt.figure() 
+        
+        plotParam = [options.plotType, 0,0]
+        if options.rawFile:
+            qUnits=0
+        else:
+            qUnits = sampleHeader[4][4]
+        colors = ['blue','red']
+        
+        plotPos = 211
+        
+        legends = [sampleFileName, refFileName]
+        ax1 = sx.saxsPlot(fig,plotPos,plotParam,[sampleData,refData],
+                            legends, qUnits=qUnits, colors=colors) 
+    
+        plotPos = 212
+        ax2 = sx.saxsPlot(fig,plotPos,plotParam,[difData,fitAvg],['difference','fit Avg']
+                ,qUnits=qUnits, colors=colors) 
+                
+        ax2.text(0.3,0.4,cfString, transform=ax2.transAxes)
+        
+        fig.subplots_adjust(bottom=0.1, hspace=0.25) 
+        fig.canvas.set_window_title(windowTitle) 
+        plt.show()
+
+
+def normalData(saxsData):
+    ##### find data point with q closest to zero
+    jQzero = np.abs(saxsData[0]).argmin()
+    ##### average intensities of five points closest to q=zero
+    beamPeakAvg = np.average(saxsData[1][jQzero-2:jQzero+3])
+    ##### return data normalized by beam peak intensity
+    return [saxsData[0],saxsData[1]/beamPeakAvg, saxsData[2]/beamPeakAvg]
+
+def tempPrompt(curValue):
+    message = '\nThe temperature for the water sample must be between '\
+                    + '0 and 100 degrees C.' \
+                    + '\nPlease enter a valid value. '
+    while (curValue < 0.0 or curValue >100):
+        curValue = float(raw_input(message))
+    return curValue
+    
+if __name__=="__main__":
+    main()

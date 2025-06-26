@@ -1,0 +1,11 @@
+# Desmeared data
+# Fri, 27 Apr 2012, 04:35 PM
+#
+# Input file: RNAseA_diff.pdh
+# Desmearing interations: 4
+# Window length for smoothing intermediate results: 15
+# No smoothing of final curve
+# Q-range for desmearing: 0.02--0.4
+# Beam-length smearing profile:  Sigmoidal; a = 86.9237 ; b = 0.0302119
+# Detector slit length = 0.154053
+# Beam half-width = 0

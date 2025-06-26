@@ -1,0 +1,257 @@
+#! /Library/Frameworks/Python.framework/Versions/Current/bin/python
+
+#   protScattDens, a Python script to calculate X-ray and neutron scattering densities 
+#   of proteins from amino acid sequences. 
+#  (c) 2009-2011 by David P. Goldenberg
+#  Please send feature requests, bug reports, or feedback to this address:
+#           Department of Biology
+#           University of Utah
+#           257 South 1400 East
+#           Salt Lake City, UT
+#     
+#           goldenberg@biology.utah.edu
+#     
+#  This software is distributed under the conditions of the BSD license.
+#  Please see the documentation for further details.
+
+
+import sys
+import string
+import soln
+from optparse import OptionParser
+def main():
+
+    parser = OptionParser()
+    parser.add_option("-i", "--info", action="store_true", dest="showInfo", default=False,
+                    help ="Show more help information.")
+
+    parser.add_option("-s", "--si", action = "store_true", dest="stdin", default = False, 
+                       help="Read data from system standard input")  
+    
+    parser.add_option("--mfd", action="store", dest="mfd2o", type=float, default=None,
+                    help ="Mass fraction of water as D2O. Default is 0")
+
+    parser.add_option("--vfd", action="store", dest="vfd2o", type=float, default=None,
+                    help ="Volume fraction of water as D2O. Default is 0")
+
+    parser.add_option("--fdeut", action="store", dest="fdeut", type=float, default=0.0,
+                    help ="Fraction deuteration of non-exchangeable protein hydrogens. Default is 0")
+                    
+    parser.add_option("--fhexch", action="store", dest="fhexch", type=float, default=1.0,
+                    help ="Fraction exchangeable hydrogens exchanged. Default is 1")
+                    
+    parser.add_option("--vbar", action = "store", dest="vbar", type= float, default = 0.74, 
+                   help="Partial specific volume, cm^3/g. Default = 0.74")
+    
+    (options,args) = parser.parse_args()
+    
+    info = """    protScattDens, a Python script to calculate X-ray and neutron scattering densities 
+    of proteins from amino acid sequences. Accepts one argument, name of 
+    protein sequence file in FASTA format
+    Options:
+        -h, --help       show this help message and exit
+        -i, --info       Show more help information.
+        -s, --si         Read data from system standard input
+        --mfd=MFD2O      Mass fraction of water as D2O. Default is 0
+        --vfd=VFD2O      Volume fraction of water as D2O. Default is 0
+        --fdeut=FDEUT    Fraction deuteration of non-exchangeable protein hydrogens.
+                         Default is 0
+        --fhexch=FHEXCH  Fraction peptide hydrogens exchanged. Default is 1
+        --vbar=VBAR      Partial specific volume, cm^3/g. Default = 0.74
+        
+    By default, the program calculates the molecular weight and scattering densities assuming that
+    all of the hydrogens are 1H and the protein is dissolved in 100% H2O.  The program also assumes 
+    that the ionizeable groups are in the predominant state at neutral pH, with no funny pKas.
+    
+    Assumes that protein does not add significantly to volume, density or 2H content of solution.
+    
+    D2O content of solvent can be specified as either mass fraction, with the --mfd option or volume fraction,
+    with --vfd.  Either fraction should be a value between 0 and 1. 
+    
+    The number of chemically exchangeable hydrogens is calculated from the amino acid sequence.  The fraction of 
+    these hydrogens that are actually able to exchange (because of accessiblity) can be specified
+    with the --fhexch option.
+    
+    If the protein has been biosynthetically deuterated, the fraction of non-exchangeable hydrogens replaced with
+    deuterium can be set with the --fdeut option.
+    
+    Protein volume is calculated from the molecular weight (of the fully 1H form) and 
+    the partial specific volume (vbar).  The default value for vbar is 0.74 cm^3/g.
+    Other values can be specified with the --vbar option.
+    
+    Solvent densities are calculated assuming a temperature of 25 C.
+    
+    """
+    if options.showInfo:
+        sys.exit(info)
+    
+    message = '\t protScattDens, a Python script to calculate X-ray and neutron scattering densities \n' + \
+                '\t of proteins from amino acid sequences. Accepts one argument, name of \n' +\
+                '\t protein sequence file in FASTA format For help, type \n' +\
+                '\t > protScattDens -i'
+
+    if options.stdin:
+        if len(args) != 0:
+            sys.exit(message)
+    elif len(args) != 1:
+        sys.exit(message)
+
+    vbar = options.vbar    
+    tempC = 25
+    h2oDens = soln.h2oDens(tempC)
+    d2oDens = soln.d2oDens(tempC)
+    Mh2o = 18.0151528  # molecular weight of H2O in g/mol
+    Md2o = 20.027604  # molecular weight of D2O in g/mol  
+    Na = 6.0221367E23 # Avogadro's number
+    bH = -3.7409E-13 # neutron scattering length of natural H (99.985% 1H), in cm
+    bD = 6.674E-13   # neutron scattering length of 2H, in cm
+    mH = 1.00794    # atomic mass of 1H
+    mD = 2.0141     # atomic mass of 2H
+
+    ###### check that the parameters are valid and calculate the derived parameters ########
+    
+    if options.mfd2o and options.vfd2o:
+        message = 'Sorry, you may specify the mass fraction D2O (--mfd) \n' + \
+        'or the volume fraction (--vfd), but not both'
+        sys.exit(message)
+        
+       
+    if options.mfd2o:
+        if not(0 <= options.mfd2o <=1):
+            message = 'Sorry, the mass fraction D2O must lie between 0 and 1.'
+            sys.exit(message)           
+        mfd = options.mfd2o
+        vfd = soln.vFracB(mfd, h2oDens,d2oDens)
+    elif options.vfd2o:
+        if not(0 <= options.vfd2o <=1):
+            message = 'Sorry, the volume fraction D2O must lie between 0 and 1.'
+            sys.exit(message)
+        vfd = options.vfd2o
+        mfd = soln.mFracB(vfd, h2oDens,d2oDens)
+    else:
+        mfd = 0.0
+        vfd = 0.0
+    
+    molFracD2O = (mfd/Md2o)/(mfd/Md2o + (1.0-mfd)/Mh2o)
+    
+    if (options.fhexch < 0 or options.fhexch > 1):
+            message = 'Sorry, the fraction of exchanged hydrogens lie between 0 and 1.'
+            sys.exit(message)           
+    if (options.fdeut < 0 or options.fdeut > 1):
+            message = 'Sorry, the fraction deuteration lie between 0 and 1.'
+            sys.exit(message)           
+    
+
+    ####### Open and read sequence file ################    
+    if options.stdin:
+        seqFile = sys.stdin
+    else:
+        seqFile= open(args[0],'r')
+        
+    sequence = ''
+    header = seqFile.readline()
+    for line in seqFile.readlines():
+        line = line[:-1]
+        if len(line)>0:
+            sequence += line
+
+
+    setAAprops()  # amino acid properties are read into a dictionary
+
+    ############### Read through sequence and add up properties   #########      
+
+    mwH = aaprops['HOH'][0]             # molecular weight of all-1H form
+    xrayScattLen = aaprops['HOH'][1]    # X-ray scattering length (independent of H1/2H content)
+    neutScattLenH = aaprops['HOH'][2]   # neutron scattering length for all-1H form
+    noxchH = 0							# non-exchangeable hydrogens
+    pepH =0    							# peptide hydrogens
+    otherXchH = aaprops['HOH'][5]       # other exchangeable hydrogens
+      
+    ct=0
+    # number of non-exchangeable hydrogens
+    for res in sequence:
+        mwH += aaprops[res][0]
+        xrayScattLen += aaprops[res][1]
+        neutScattLenH += aaprops[res][2]
+        pepH += aaprops[res][4]
+        otherXchH += aaprops[res][5]
+        noxchH += aaprops[res][3] - aaprops[res][4] - aaprops[res][5]
+     	ct +=1
+
+	pepHexch = pepH*molFracD2O*options.fhexch	# average number of peptide hydrogens actually exchanged with 2H
+    avgOtherHexch = otherXchH*molFracD2O   		# average number of other hydrogens actually exchanged with 2H
+    avgHexch = pepHexch + avgOtherHexch			# total average number of exchanged hydrogens
+    avgDeutH = noxchH*options.fdeut             # average number of non-exch hydrogens replaced with 2H
+
+
+    neutScattLen = neutScattLenH + (avgHexch+avgDeutH)*(bD - bH) # neutron scattering length of protein with 2H
+    
+    xrayScattDens = xrayScattLen*Na/(mwH*vbar)  # X-ray scattering density
+    neutScattDens = neutScattLen*Na/(mwH*vbar)  # neutron scattering density
+ 
+    rhoXraySolv = soln.rhoXrayWat(tempC,vfd)   # X-ray solvent scattering density
+    rhoNeutSolv = soln.rhoNeutWat(tempC,vfd)   # Neutron solvent scattering density
+
+    xrayContrast = xrayScattDens-rhoXraySolv    # X-ray scattering contrast
+    neutContrast = neutScattDens - rhoNeutSolv  # Neutron scattering contrast
+
+    print ''
+    print '\tNumber of residues = %d' % ct
+    print '\tMolar mass (all 1H) = %8.2f' % mwH
+    print '\tTotal hydrogens = %d' % (pepH + otherXchH + noxchH)
+    print '\tExchangeable peptide hydrogens = %d' % pepH
+    print '\tOther exchangeable hydrogens = %d' % otherXchH
+    print '\tNon-exchangeable hydrogens = %d \n' % noxchH
+    
+    print '\tProtein X-ray scattering density = %6.4g cm-2' % xrayScattDens
+    print '\tSolvent X-ray scattering density = %6.4g cm-2' % rhoXraySolv
+    print '\tX-ray scattering contrast = %6.4g cm-2 \n' % xrayContrast 
+    
+    
+    print '\tProtein neutron scattering density = %6.4g cm-2' % neutScattDens
+    print '\tSolvent neutron scattering density = %6.4g cm-2' % rhoNeutSolv
+    print '\tNeutron scattering contrast = %6.4g cm-2 \n' % neutContrast 
+
+
+def setAAprops():
+    """Creates global dictionary with amino acid residue information
+    Keys are single-letter amino acid codes (+ HOH for water)
+    Value are five element lists.  List elements:
+        Molecular weight of fully 1H form of residue
+        X-ray scattering length of residue
+        Neutron scattering length of the 1H form
+        Total number of hydrogens in residue
+        Number of peptide hydrogens in residue
+        Number of other exchangeable hydrogens
+    Numbers of hydrogens reflect predominant form at neutral pH,
+    assuming no funny pKas"""
+        
+    be = 0.28179E-12 # X-ray scattering length of an electron, in cm
+    global aaprops
+    aaprops= {
+    'HOH': [18.01528, 10.0*be, -1.68E-13, 2, 0, 2],
+    'A': [71.07793,    38.0*be,   1.64E-12,  5,  1, 0],
+    'R': [157.19362,   85.0*be,   3.45E-12,  13, 1, 5],
+    'N': [114.10264,   60.0*be,   3.45E-12,  6,  1, 2],
+    'D': [114.07946,   59.0*be,   3.84E-12,  4,  1, 0],
+    'C': [103.1429,    54.0*be,   1.93E-12,  5,  1, 1],
+    'Q': [128.12922,   68.0*be,   3.36E-12,  8,  1, 2],
+    'E': [128.10604,   67.0*be,   3.76E-12,  6,  1, 0],
+    'G': [57.05132,    30.0*be,   1.72E-12,  3,  1, 0],
+    'H': [137.13928,   72.0*be,   4.76E-12,  7,  1, 1],
+    'I': [113.15764,   62.0*be,   1.39E-12,  11, 1, 0],
+    'L': [113.15764,   62.0*be,   1.39E-12,  11, 1, 0],
+    'K': [129.18022,   71.0*be,   1.58E-12,  13, 1, 3],
+    'M': [131.19606,   70.0*be,   1.76E-12,  9,  1, 0],
+    'F': [147.17386,   78.0*be,   4.13E-12,  9,  1, 0],
+    'P': [97.11518,    52.0*be,   2.22E-12,  7,  0, 0],
+    'S': [87.0773,     46.0*be,   2.22E-12,  5,  1, 1],
+    'T': [101.10388,   54.0*be,   2.14E-12,  7,  1, 1],
+    'W': [186.2099,    98.0*be,   6.02E-12,  10, 1, 1],
+    'Y': [163.17326,   86.0*be,   4.71E-12,  9,  1, 1],
+    'V': [99.13106,    54.0*be,   1.47E-12,  9,  1, 0]
+    }
+
+    
+if __name__=="__main__":
+    main()

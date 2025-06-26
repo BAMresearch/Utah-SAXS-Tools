@@ -1,0 +1,26 @@
+# saxs fit parameters
+0.015		# min q-value for fitting
+0.5		 	# max q value for fitting
+n			# include beam width correction (y or n)
+y			# Allow background correction (fit constant offset) 
+# Options for fitting to a linear combination of two models
+n			# fit to linear combination of 1st two models in the model file (y or n)
+0		# specified fraction of first model in linear comb.  Allow to float if 0
+#  Parameters for incorporation of hard-sphere solution structure factor
+n		# include structure factor in fit (y or n)
+0	# specified volume density (phi) for structure factor (0<phi<0.5).  Allow to float if 0
+0			# specified sphere radius for structure factor. Allow to float if 0
+#	Plot limits (limits are ignored if max is not greater than min)
+0.0			# min q-value for plotting
+0.5		# max q-value for plotting
+0		# min i-value for plotting
+0		# max i-value for plotting
+#	Plot options
+linear			# plot type: "linear", "log", "loglog", "guinier" or "kratky"
+3			# No of model fits to plot (starting with best fit)
+n			# plot smear functions (y or n)
+n			# Plot unsmeared model for best fit (form factor and structure factor)
+#	Output options
+y			# Show plots (on screen): 'y' or 'n'
+n			# Save plots: 'y' or 'n'
+ps			# Image format for plots:  'emf', 'eps', 'pdf', 'png', 'ps', 'raw', 'rgba', 'svg', 'svgz' 

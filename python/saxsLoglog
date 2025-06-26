@@ -1,0 +1,237 @@
+#! /Library/Frameworks/Python.framework/Versions/Current/bin/python
+
+#   A Python script to generate a log-log plot and fit data to a power function.
+
+#  (c) 2009-2011 by David P. Goldenberg
+#  Please send feature requests, bug reports, or feedback to this address:
+#           Department of Biology
+#           University of Utah
+#           257 South 1400 East
+#           Salt Lake City, UT
+#     
+#           goldenberg@biology.utah.edu
+#     
+#  This software is distributed under the conditions of the BSD license.
+#  Please see the documentation for further details.
+
+import sys
+from optparse import OptionParser
+
+import numpy as np 
+from scipy.optimize import curve_fit
+import matplotlib.pyplot as plt
+from uncertainties import correlated_values
+
+import saxs as sx
+
+info = """ saxsLoglog.py
+      A Python script to generate a log-log plot and fit data to a power function.
+      The program requires three inputs, 
+      The min and max Q values for fitting
+      and the name of the input data file
+    
+    Options:
+      -h, --help                              show this help message and exit
+      -i, --info                              Show more help information.
+      -r, --raw                               Raw input file. Default is pdh format
+      -s, --si                                Read data from system standard input
+      -p IMGFILENAME, --pfile=IMGFILENAME     Image file name. Suffix specifies format.         
+                                              Default is None
+      --noErr                                 no I error data.
+      --qpMin=QPMIN                           Minimum q-value for plotting
+      --qpMax=QPMAX                           Maximum q-value for plotting
+      --ipMin=IPMIN                           Minimum i-value for plotting
+      --ipMax=IPMAX                           Maximum i-value for plotting
+    
+      The default behavior is to assume the data files are in PDH format
+      If the option -r (or --raw) is used, the program assumes the files 
+      are in a "raw" format and only looks for rows containing exactly three fields.
+      For data without errors, use the -r and -noErr options
+    
+      The plot can be saved as an image file by s
+      pecifying a file name with the -p or -pfile name
+      No file is saved if no name is specified.
+      The format is is specified by the file name suffix.
+      Supported formats are: emf, eps, pdf, png, ps, raw, rgba, svg, svgz.
+      Default format is png. A png file can also be saved from the plot window.
+    
+      The --noErr option plots data without error bars and does not weight data for fitting.
+    
+      Executing the program with the incorrect number of arguments prints a short message.
+        
+  """
+
+
+def main():
+
+    ##### Parse options and arguments   ##########
+    parser = OptionParser()
+
+    parser.add_option("-i", "--info", action="store_true", dest="showInfo", default=False,
+                    help ="Show more help information.")
+    parser.add_option("-r", "--raw", action = "store_true", dest="rawFile", default = False, 
+                   help="Raw input file. Default is pdh format")
+    parser.add_option("-s", "--si", action = "store_true", dest="stdin", default = False, 
+                       help="Read data from system standard input")  
+    parser.add_option("-p", "--pfile", action = "store", type="string", dest="imgFileName", 
+                        default = None, help="Image file name. Suffix specifies format. Default is None")                                                                    
+    parser.add_option("--noErr", action = "store_true", dest="noErr", default = False, 
+                   help="no I error data.")
+                   
+    parser.add_option("--qpMin", action = "store", type = "float", 
+                   dest="qpMin", default = "0.0", 
+                   help="Minimum q-value for plotting")
+
+    parser.add_option("--qpMax", action = "store", type = "float", 
+                   dest="qpMax", default = "0.0", 
+                   help="Maximum q-value for plotting")
+
+    parser.add_option("--ipMin", action = "store", type = "float", 
+                   dest="ipMin", default = "0.0", 
+                   help="Minimum i-value for plotting")
+
+    parser.add_option("--ipMax", action = "store", type = "float", 
+                   dest="ipMax", default = "0.0", 
+                   help="Maximum i-value for plotting")
+
+    (options, args) = parser.parse_args()
+    
+
+    if options.showInfo:
+        sys.exit(info)
+
+    message = '\nsaxsLoglog.py: A python script to make a log-log plot and fit data. \n' \
+                + 'Requires three input arguments: qMin, qMax and file name ' \
+                + '(or two input arguments with standard input  option (-s or --si).) \n' \
+                + 'For help, type > saxsLoglog.py -i'
+   
+    if options.stdin:
+        if len(args) == 2:
+            dataFileName = None
+        else:
+            sys.exit(message)
+    else:
+        if len(args) == 3:        
+             dataFileName = args[2]
+        else:
+            sys.exit(message) 
+            
+            
+    windowTitle = 'SAXS Log-Log Plot'
+    if dataFileName != None:
+        windowTitle += ': ' + dataFileName
+
+
+    qMin = float(args[0])
+    qMax = float(args[1])
+
+    if options.rawFile:
+        if options.noErr:
+            data = sx.readQI(dataFileName)
+        else:
+            data = sx.readQIE(dataFileName)
+        data = np.array(data)
+    else:
+        header, data = sx.readPdh(dataFileName)
+        if options.noErr:
+            data = np.array([data[0],data[1]])
+        else:
+            data = np.array(data)
+    
+    ###### Select data for fitting   ####        
+    selq=[]
+    seli=[]
+    selerr=[]
+    for j,q in enumerate(data[0]):
+        if qMin<=q<qMax:
+            selq.append(q)
+            seli.append(data[1][j])
+            if not(options.noErr):
+                selerr.append(data[2][j])
+    selq=np.array(selq)
+    seli=np.array(seli)
+    if not(options.noErr):
+        selerr=np.array(selerr)
+    else:
+        selerr = None
+
+    fitParam,fitCov = curve_fit(powerFunc,selq,seli,sigma=selerr)
+    
+    (pow, k) =  correlated_values(fitParam,fitCov)
+
+
+    fiti = powerFunc(selq, fitParam[0],fitParam[1])
+    fitData = [selq,fiti]
+
+    dataList = [data,fitData]
+    legendList = [dataFileName,'Power-law fit']
+    text = 'Power-law fit : $I(q) = k q^{-D_m}$ \n\t $D_m$= %4.2f $\pm$ %4.2f \t$k$ = %4.2G $\pm$ %4.2G' % (-pow.nominal_value, pow.std_dev(), k.nominal_value, k.std_dev())
+    text = text + '\n\t%4.3f $< q >$ %4.3f' % (qMin,qMax)
+
+
+    ######### Plot limits for q and I ############
+        
+    if options.qpMin == options.qpMax:
+        qlim = 0
+    elif (options.qpMin ==0.0 and options.qpMax !=0.0):
+        qpMin = np.amin(data[0])
+        qlim = [qpMin, options.qpMax]
+    elif (options.qpMin !=0.0 and options.qpMax ==0.0):
+        qpMax = np.amax(data[0])
+        qlim = [options.qpMin, qpMax]
+    else:        
+        qlim = [options.qpMin,options.qpMax]
+
+
+    if options.ipMin == options.ipMax:
+        ilim = 0
+    elif (options.ipMin ==0.0 and options.ipMax !=0.0):
+        ipMin = np.amin(data[1])
+        ilim = [ipMin, options.ipMax]
+    elif (options.ipMin !=0.0 and options.ipMax ==0.0):
+        ipMax = np.amax(data[1])
+        ilim = [options.ipMin, ipMax]
+    else:        
+        ilim = [options.ipMin,options.ipMax]
+
+
+    ########## Plot Parameters  ###############    
+    plotParam = ['loglog',qlim,ilim]
+    colorList = ['k','r']
+    
+    if options.rawFile:
+        qUnits=0
+        absI = False
+    else:
+        qUnits = header[4][4]        
+        if header[2][2] == 1:
+            absI = True
+        else:
+            absI = False
+        
+    fig = plt.figure()
+    plotPos = 111
+    ax1 = sx.saxsPlot(fig,plotPos, plotParam, dataList, 
+            legends=legendList,colors = colorList, qUnits=qUnits, absI=absI)
+    
+    ax1.text(0.05,0.3, text,bbox=dict(facecolor='white', alpha=0.5),
+            horizontalalignment='left',
+            verticalalignment='top', 
+            transform = ax1.transAxes)
+    
+    fig.subplots_adjust(bottom=0.12) # This adds a little extra space at the bottom
+    fig.canvas.set_window_title(windowTitle)
+
+    if options.imgFileName != None:
+        fig.savefig(options.imgFileName)
+        
+    plt.show()
+
+def powerFunc(q,pow,k):
+    i = k*q**pow
+    return i
+    
+    
+if __name__=="__main__":
+    main()
+

@@ -1,0 +1,181 @@
+#! /Library/Frameworks/Python.framework/Versions/Current/bin/python
+
+#   A Python script to bin and average sequential data points in a saxs profile
+
+#  (c) 2009-2011 by David P. Goldenberg
+#  Please send feature requests, bug reports, or feedback to this address:
+#           Department of Biology
+#           University of Utah
+#           257 South 1400 East
+#           Salt Lake City, UT
+#     
+#           goldenberg@biology.utah.edu
+#     
+#  This software is distributed under the conditions of the BSD license.
+#  Please see the documentation for further details.
+
+import sys
+from optparse import OptionParser
+import numpy as np 
+import matplotlib.pyplot as plt
+from uncertainties import ufloat
+import saxs as sx
+
+info = """ saxsBinData.py
+      A Python script to bin and average sequential data points in a saxs profile
+      The program requires one input argument, the names of the data file.
+      Options:
+      -h, --help            show this help message and exit
+      -i, --info            Show more help information.
+      -r, --raw             Raw input file. Default is pdh format
+      -s, --si              Read data from system standard input and write to
+                            standard output
+      --so                  Direct output to system standard output
+      -n NAVG, --nAvg=NAVG  Number of points for averaging. Default is 4.
+      -d DQ, --dQ=DQ        Delta Q to determin averaging.  Overrides nAvg.
+      -t PLOTTYPE, --plot=PLOTTYPE
+                            Plot type. Options are none, linear, log, loglog,
+                            guinier, kratky. Default is linear
+    
+      The binned profile is directed to a new file, 
+      or to standard output if the -s (--stdo) option is chosen.
+      The default behavior is to assume the data file is in PDH format.
+      If the file names are preceded by the argument -r, the program assumes the files 
+      are in a "raw" format and only looks for rows containing exactly three fields.
+    
+      The number of data points to be binned and averaged
+      for each new data pointed can be specified in two ways:
+      The -n (or --NAVG) option specifies the number of points to be averaged.
+      The -d (or --DQ) option specifies the interval and q-values to be averaged over. 
+      The program chooses the 
+      integral number of points that will provide a delta q closest to the value specified.
+        
+  """
+
+def main():
+    ##### Parse options and arguments   ##########
+    parser = OptionParser()
+    
+    parser.add_option("-i", "--info", action="store_true", dest="showInfo", default=False,
+                        help ="Show more help information.")
+    parser.add_option("-r", "--raw", action = "store_true", dest="rawFile", default = False, 
+                       help="Raw input file. Default is pdh format")
+    parser.add_option("-s", "--si", action = "store_true", dest="stdin", default = False, 
+                help="Read data from system standard input and write to standard output")  
+    parser.add_option("--so", action = "store_true", dest="stdo", default = False, 
+                       help="Direct output to system standard output")                       
+    parser.add_option("-n", "--nAvg", action = "store", type = "int", 
+                   dest="nAvg", default = "4", 
+                   help="Number of points for averaging. Default is 4")
+    parser.add_option("-d", "--dQ", action = "store", type = "float", 
+                   dest="dQ", default = "0.0", 
+                   help="Delta Q to determin averaging.  Overrides nAvg.")
+    parser.add_option("-t", "--plot", action = "store", type = "string", 
+                       dest="plotType", default = "linear", 
+                       help="Plot type. Options are none, linear, log, "\
+                            + "loglog, guinier, kratky. Default is linear")    
+    
+    (options, args) = parser.parse_args()
+
+    
+    if options.showInfo:
+        sys.exit(info)
+        
+    message = '\n saxsBinData.py: A python script to bin and ' \
+                + 'average sequential data points in a SAXS profile.\n'\
+                + ' For help, type > saxsBinData.py -i'
+
+    fileNames = sx.fileNamer(options,args,1, 'bin')
+    if fileNames == None:
+        sys.exit(message)
+    else:
+        inFileName = fileNames[1]
+        outFileName = fileNames[2]
+	
+	
+	###### Window Title
+	if inFileName == None:
+		windowTitle = 'SAXS Binned Data'
+		inputLegend = ['Input data']
+	else:   
+		inputLegend = [inFileName]
+		windowTitle = 'SAXS Binned Data: ' + inFileName
+    
+    ###### Read input data
+        
+    if options.rawFile:
+        data = sx.readQIE(inFileName)
+    else:
+        header, data = sx.readPdh(inFileName)
+        data =np.array(data)
+    
+    ####### Set number of points to average
+    if options.dQ != 0.0:
+        dQdata = (data[0][-1] - data[0][0])/len(data[0])      
+        nAvg = int(round(options.dQ/dQdata))
+    else:
+        nAvg = options.nAvg
+    
+
+
+    binData = [[],[],[]]
+    
+    # trim no of data pts to ingegral multiple of nAvg
+    ctMax = nAvg*(len(data[0])/nAvg)
+    
+    ##### Calculate binned values
+    ct = 0
+    while ct < ctMax:
+        sumQ = 0.0
+        sumI = ufloat((0.0,0.0))
+        for i in range(nAvg):
+            sumQ += data[0][ct]
+            sumI += ufloat((data[1][ct],data[2][ct]))
+            ct += 1
+        avgQ = sumQ/nAvg
+        avgI = sumI/nAvg
+            
+        binData[0].append(avgQ)
+        binData[1].append(avgI.nominal_value)
+        binData[2].append(avgI.std_dev())
+        
+        
+    #### Plots   
+    if options.plotType != 'none':
+        plotParam = [options.plotType,0,0]
+        if options.rawFile:
+            qUnits=0
+            absI = False
+        else:
+            qUnits = header[4][4]
+            if header[2][2] == 1:
+                absI = True
+            else:
+                absI = False
+        
+        binLegend = ['Binned data.  Bin size =: ' + str(nAvg)]
+                
+        fig = plt.figure()
+        plotPos = 211
+        ax1 = sx.saxsPlot(fig,plotPos, plotParam, [data],
+                            legends=inputLegend, qUnits=qUnits, absI=absI)
+        plotPos=212
+        ax2 = sx.saxsPlot(fig,plotPos, plotParam, [binData],
+                            legends=binLegend, qUnits=qUnits, absI=absI)
+        fig.subplots_adjust(bottom=0.1, hspace=0.25) 
+        fig.canvas.set_window_title(windowTitle) 
+        plt.show()
+        
+
+    ##### write binned data to output file
+    if options.rawFile:
+        sx.writeQIE(outFileName,binData)
+    else:
+        header[2][0] = len(binData[0])
+        sx.writePdh(outFileName, header,binData)
+
+    
+if __name__=="__main__":
+    main()
+
+

@@ -1,0 +1,130 @@
+#! /Library/Frameworks/Python.framework/Versions/Current/bin/python
+
+# A Python script to calculate physical properties of water solutions as a function of temperature
+#  (c) 2011 by David P. Goldenberg
+#  Please send feature requests, bug reports, or feedback to this address:
+#           Department of Biology
+#           University of Utah
+#           257 South 1400 East
+#           Salt Lake City, UT
+#     
+#           goldenberg@biology.utah.edu
+#     
+#  This software is distributed under the conditions of the BSD license.
+#  Please see the Utah SAXS Tools documentation for further details.
+
+info = """      waterProps, a Python script to calculate mass density and 
+    X-ray and neutron scattering densities of water and H2O/D2O mixtures. 
+    Requires 1 input argument, the temperature in degrees C.
+    Options:
+        -h, --help   show this help message and exit
+        -i, --info   Show more help information.
+        --mfd=MFD2O  Mass fraction of water as D2O. Default is 0
+        --vfd=VFD2O  Volume fraction of water as D2O. Default is 0
+    Caculates mass density, X-ray and neutron scattering densities.
+    If D2O fraction is zero, also calculates compressibility (Pa-1)
+    and absolute scattering intensity (cm-1).
+    uses data of:
+        Kell, G. S. (1967). Precise representation of volume properties 
+        of water at one atmosphere. J. Chem. Eng. Data, 12, 66-69. 
+        http://dx.doi.org/10.1021/je60032a018
+    for density of D2O   
+        Kell, G. S. (1975). Density, thermal expansivity, and compressibility
+        of liquid water from 0 to 150 C: Correlations and tables for atmospheric 
+        pressure and stauration reviewed and expressed on 1968 temperature scale. 
+        J. Chem. Eng. Data, 20, 97-105. 
+        http://dx.doi.org/10.1021/je60064a005
+    For density and compressibility of H2O
+    Assumes that volumes of H2O and D2O add ideally."""
+        
+          
+import sys
+import string
+import soln
+from optparse import OptionParser
+def main():
+    parser = OptionParser()
+    parser.add_option("-i", "--info", action="store_true", dest="showInfo", default=False,
+                    help ="Show more help information.")
+    
+    parser.add_option("--mfd", action="store", dest="mfd2o", type=float, default=None,
+                    help ="Mass fraction of water as D2O. Default is 0")
+
+    parser.add_option("--vfd", action="store", dest="vfd2o", type=float, default=None,
+                    help ="Volume fraction of water as D2O. Default is 0")
+    
+    (options,args) = parser.parse_args()
+    
+    if options.showInfo:
+        sys.exit(info)
+    
+    message = 'waterProps, a Python script to calculate mass density and \n' + \
+                'X-ray and neutron scattering properties of water and H2O/D2O mixtures. \n' +\
+                'Requires 1 input argument, the temperature in Celsius ' +\
+                'For help, type > waterProps -i'
+    if len(args) != 1:
+        sys.exit(message)
+    
+    tempC = float(args[0])
+    
+    ###### check that the parameters are valid and calculate the derived parameters ########
+    
+    if not(0.0 <= tempC <= 100.0):
+        message = 'Sorry, the temperature must lie between 0 and 100 C.'
+        sys.exit(message)
+    if options.mfd2o and options.vfd2o:
+        message = 'Sorry, you may specify the mass fraction D2O (--mfd) \n' + \
+        'or the volume fraction (--vfd), but not both'
+        sys.exit(message)
+    
+    h2oDens = soln.h2oDens(tempC)
+    if options.mfd2o or options.vfd2o:
+        d2oDens = soln.d2oDens(tempC)
+
+    
+    if options.mfd2o:
+        if not(0 <= options.mfd2o <=1):
+            message = 'Sorry, the mass fraction D2O must lie between 0 and 1.'
+            sys.exit(message)           
+        mfd = options.mfd2o
+        vfd = soln.vFracB(mfd, h2oDens,d2oDens)
+    elif options.vfd2o:
+        if not(0 <= options.vfd2o <=1):
+            message = 'Sorry, the volume fraction D2O must lie between 0 and 1.'
+            sys.exit(message)
+        vfd = options.vfd2o
+        mfd = soln.mFracB(vfd, h2oDens,d2oDens)
+    else:
+        mfd = 0.0
+        vfd = 0.0
+ 
+    if vfd > 0:
+        dens = soln.mixDens(vfd,h2oDens,d2oDens)
+    else:
+        dens = h2oDens
+
+    rhoXray = soln.rhoXrayWat(tempC,vfd)
+    rhoNeut = soln.rhoNeutWat(tempC,vfd)
+    
+    if vfd == 0.0:    
+        print '   H2O at %g C:' % tempC
+    elif options.vfd2o:
+        print '   %g percent D2O (v/v) at %g C:' % (100.0*vfd, tempC)
+        print '\tMass fraction D2O = %3.1f percent' % (100.0*mfd)
+    elif options.mfd2o:
+        print '   %g percent D2O (m/m) at %g C:' % (100.0*mfd, tempC)
+        print '\tVolume fraction D2O = %3.1f percent' % (100.0*vfd)
+    print '\tMass density = %7.6g g/cm-3' % dens
+    print '\tX-ray scattering density = %8.5g cm-2' % rhoXray
+    print '\tNeutron scattering density = %8.5g cm-2' % rhoNeut
+
+    
+    if vfd==0.0:
+        h2oCompr = soln.h2oCompr(tempC)
+        h2oAbsScattInt = soln.h2oI0(tempC)
+        print '\tCompressibility= %8.5g Pa-1' % h2oCompr
+        print '\tAbsolute X-ray scattering intensity = %8.5g cm-1' % h2oAbsScattInt
+
+if __name__=="__main__":
+    main()
+   

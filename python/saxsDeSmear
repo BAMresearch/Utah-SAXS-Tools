@@ -1,0 +1,586 @@
+#! /Library/Frameworks/Python.framework/Versions/Current/bin/python
+
+# A python script to numerically "desmear" saxs data from a line-colimated camera
+
+#  (c) 2009-2011 by David P. Goldenberg
+#  Please send feature requests, bug reports, or feedback to this address:
+#           Department of Biology
+#           University of Utah
+#           257 South 1400 East
+#           Salt Lake City, UT
+#     
+#           goldenberg@biology.utah.edu
+#     
+#  This software is distributed under the conditions of the BSD license.
+#  Please see the documentation for further details.
+
+import numpy as np
+import re
+from scipy import interpolate
+from optparse import OptionParser
+
+import sys
+import time
+
+import matplotlib
+import matplotlib.pyplot as plt    
+import saxs as sx
+
+info = """ saxsDeSmear
+    A python script to numerically "desmear" saxs data from a line-colimated camera
+    Based on the iterative method of Lake:
+      Lake, J. A. (1967). An iterative method of slit-correcting 
+       small angle x-ray data. Acta Cryst., 23, 191-194. 
+      http://dx.doi.org/10.1107/S0365110X67002440
+    
+     Allows correction for:
+      1. smearing due to the length of the beam profile 
+      2. The finite width of the "detector slit", (equivalent to the width of the
+          integration profile used with a two dimensional detector or image plate), 
+          which further smears the scattering profile
+      3. The beam width
+      
+    Requires 2 command-line arguments:
+    	The name of a parameter file
+    	The name of the input SAXS profile file, in pdh format
+    
+    Outputs 2 files:
+        The smeared profile in pdh format.
+        A log file with details of the desmearing parameters
+    
+    The header information of the pdh file is modified to indicate no smearing
+    (beam type = 0), but the other beam and slit parameters are retained.
+    
+    Options:
+      	-h, --help  show this help message and exit
+  		-i, --info  Show more help information.
+ 		-s, --si    Read data from system standard input and write to standard
+              output
+  		--so        Direct output to system standard output
+
+    The parameters for the beam proflie and detctor slit length are read from
+    the header information of the experimental data file, in pdh format.
+    See the documentation for the Utah Saxs Tools
+    
+    Other parameters are read from a parameter file
+    specified as the first command line argument
+    
+     A sample parameter file:  
+            
+    #  SAXS desmearing parameters
+    3				    # desmearing iterations
+    15				# smoothing window for intermediate results (odd integer)
+    1 				# smoothing window for result of last iteration (odd integer)
+    0.02			    # q min for desmearing
+    0.4				# q max for desmearing
+    0.001			    # delta q for desmeared curve
+    n				    # include beam width correction: 'y' or 'n'
+    #	Plot limits
+    0.0				# q min for plotting
+    0.6				# q max for plotting
+    1E-3			    # i min for plotting
+    1 				# i max for plotting
+    #	Plot options
+    log				# plot type: "linear", "log", "loglog", "guinier" or "kratky"
+    n				    # plot smear functions: 'y' or 'n'
+    y				    # Show plots (on screen): 'y' or 'n'
+    n				    # Save plots: 'y' or 'n'
+    pdf				# Image format for plots:    
+    #                      'emf','eps','pdf','png','ps','raw','rgba','svg','svgz' 
+    
+    The parameter file can contain blank lines or comment lines that begin with '#'.
+    Parameters can also be followed by comments as shown above.
+    But, all of the parameters must be included in the specified order.
+    
+"""
+def main():
+
+    # handle arguments and options of OptionParser
+    parser = OptionParser()
+    parser.add_option("-i", "--info", action="store_true", dest="showInfo", default=False,
+                help ="Show more help information.")
+    parser.add_option("-s", "--si", action = "store_true", dest="stdin", default = False, 
+                help="Read data from system standard input and write to standard output")  
+    parser.add_option("--so", action = "store_true", dest="stdo", default = False, 
+                       help="Direct output to system standard output")                       
+
+    (options, args) = parser.parse_args()
+    
+    if options.showInfo:
+        sys.exit(info)
+    
+    message = '\n saxsDeSmear.py: A Python script for desmearing SAXS data '\
+                + 'from a line-colimated instrument. \n' \
+                + ' For more information, type > saxsDeSmear -i'
+    
+    #### assign file names
+    if options.stdin:
+        if len(args) == 1:
+            expDataFileName = None            
+            rootName = ''
+            outFileName = None
+            logFileName = 'desmear.log'
+        else:
+            sys.exit(message)
+    else:
+        if len(args) == 2:
+            expDataFileName = args[1]
+            rootName = expDataFileName.rpartition('.')[0]
+            outFileName = rootName+'_dsm.pdh'
+            logFileName = rootName+'_dsm.log'
+        else:
+            sys.exit(message) 
+    if options.stdo:
+        outFileName = None
+        
+    parFileName = args[0]
+
+    ###### Window Title
+    if expDataFileName == None:
+        windowTitle = 'SAXS Desmeared Data'
+    else:   
+        windowTitle = 'SAXS Desmeared Data: ' + expDataFileName
+        
+
+    # parameters from user parameter file        
+    params = readParamFile(parFileName)
+        
+
+    # header and data from experimental parameter file
+    # expData is a list of 3 1-dimensional numpy arrays: q, I, errors
+    pdhHeader, expData = sx.readPdh(expDataFileName)    
+    
+    # smearing parameters from header of pdh file
+    wParams = sx.setWparams(pdhHeader)
+    qUnits = pdhHeader[4][4]
+    if params['bwCorrect']==0:    
+        wParams[3]=0
+    beamProfType = wParams[0]
+    bhw = wParams[3]
+
+    if beamProfType == 0:
+        message = """ \nAccording to the pdh header information, these data are not smeared. """                
+        sys.exit(message)
+    
+    
+    # Initial experimental data are trimmed to working range
+    Itrim= [[],[],[]]
+    for j,q in enumerate(expData[0]):
+        if (q>=params['qLim'][0]):
+            if (q<=params['qLim'][1]):
+                Itrim[0].append(q)
+                Itrim[1].append(expData[1][j])
+                Itrim[2].append(expData[2][j])
+            else:
+                break
+    Itrim = np.array(Itrim)
+
+    # calculate interpolated values for experimental data, with errors, Ios 
+    # Uses scipy interpolate, stores results as cubic spline parameters
+    q = np.arange(params['qLim'][0],params['qLim'][1],params['deltaQ'])
+    s=interpolate.UnivariateSpline(Itrim[0],Itrim[1],s=0)
+    sErr=interpolate.UnivariateSpline(Itrim[0],Itrim[2],s=0)
+    Ios=[q,s(q),sErr(q)]    
+
+    # Determine the range over which the smearing weighting function is significant.
+    # I define this as values for which w(y) > eps*w(0)
+    # The function wYmax(a,b,Ld,eps) finds the maximum y value by this criterion
+    # eps=0.01 seems like a reasonable value
+    # The maximum x and y values define the range for which the smeared scattering intensity
+    # can be calculated
+
+    eps = 0.01
+
+    wym =  sx.wYmax(wParams,eps)
+    wxm = sx.wXmax(bhw,eps)
+
+    # Check that the maximum q value is large enough to survive smearing.    
+    qMaxMin = np.sqrt(wxm**2 + wym**2)
+    if qMaxMin > Ios[0][-1]:
+        message = '\n The beam length smearing window is wider than the maximum q for desmearing. \n' \
+                + 'Please increase the maximum q in the parameter file to at least ' +str(qMaxMin) + '.'                
+        sys.exit(message)
+    
+
+    # Next calculate the integral of the y-weighting factor over the 
+    # values considered, to use for normalization.
+    # The x-weighting funciton (a Gaussian) is automatically normalized
+    wnf = sx.wNormFact(wParams,wym)
+
+
+    # First iteration uses smeared experimental data, ie doubly smeared data    
+    Ioss = smear(Ios,params['qLim'][0],params['deltaQ'],wParams,wxm,wym,wnf)
+    
+   
+    # Begin lists of smeared and desmeared data from iterations, and residuals
+    Ism = [Ioss]
+    Idsm = [Ios]
+    resids = []
+        
+    # Iterations of Lake desmearing
+    for i in range(params['desmearN']):
+        # Lake iteration to generate next profile
+        Inext = lakeIt(Ios,Idsm[-1],Ism[-1], params['winLenIntermed'])  
+        Idsm.append(Inext)
+        # Smear next profile
+        InextSm = smear(Inext,params['qLim'][0],params['deltaQ'],wParams,wxm,wym,wnf)
+        Ism.append(InextSm)
+        # calculate residuals between original data and smeared desmeared data
+        res = calcStandResid(Ios,InextSm)
+        resids.append(res)
+        
+        
+    # Smear final profile, as specified in parameter file   
+    if params['winLenFinal']>=3:    
+        smoothedDsm = [Idsm[-1][0], sx.smooth(Idsm[-1][1],window_len=params['winLenFinal']),
+                sx.smooth(Idsm[-1][2],window_len=params['winLenFinal'])]    
+        Idsm.append(smoothedDsm)
+        
+        
+    # generate plots
+    
+    if pdhHeader[2][2] == 1:
+        absI = True
+    else:
+        absI = False
+
+    if (params['showPlot'] or params['savePlot']):    
+        fig1 = plotData(params['plotParam'],[expData[0:3]]+
+                        Idsm[1:],[expData[0:2]]+Ism[1:],resids,qUnits,absI)
+        fig1.suptitle(rootName)
+        fig1.canvas.set_window_title(windowTitle)
+        if params['smearFncPlot']:
+            fig2 = plotSmearFuncs(wParams,wym,wxm)
+            
+        if params['savePlot']:
+            plotFileName = rootName+'_dsm.'+ params['imgFormat']
+            fig1.savefig(plotFileName,orientation='landscape')
+    
+        if params['showPlot']:
+            plt.show()
+        
+    # output data as pdh file
+    # length of desmeared data
+    pdhHeader[0]= 'Desmeared: ' + pdhHeader[0]
+    pdhHeader[2][0] = len(Idsm[-1][0])
+    # header information set to indicate no smearing
+    pdhHeader[2][1] = 0
+    sx.writePdh(outFileName, pdhHeader,Idsm[-1])
+    
+    logOutput(params,wParams,expDataFileName, logFileName)
+    
+    # End of main procedure
+
+def calcStandResid(Ios,Ins):
+    """Calculate residuals between original smeared data
+    and desmeared data, normalized by original data.
+    Inputs are:
+    Ios: original smeared data ([q,i,err] data array)
+    In: result of previous iteration ([q,i,err] data array)
+    Ins: Smeared form of previous iteration ([q,i] data array)
+    Returns [q,residual] data array.
+    """
+    standResid = [[],[]]
+    for j in range(len(Ins[0])):
+        standResid[0].append(Ins[0][j])
+        sResid = (Ios[1][j]-Ins[1][j])/Ios[2][j]
+        standResid[1].append(sResid)
+    standResid = np.array(standResid)
+    
+    return standResid
+
+def lakeIt(Ios,In,Ins,winLenIntermed):
+    """Carries out the actual desmearing interation step, using the "fast" method
+    described by Lake.  Inputs are:
+    Ios: original smeared data ([q,i,err] data array)
+    In: result of previous iteration ([q,i,err] data array)
+    Ins: Smeared form of previous iteration ([q,i] data array)
+    winLenIntermed: window length for smoothing intermediate result.
+    Returns desmeared data ([q,i,err] data array)
+    The desmeared data array is always shorter than the original data,
+    because of the length of the weighting function.
+    To prevent the complete disappearance of the data after just a few
+    iterations, each desmeared data set is filled with the values from the
+    previous iteration.
+    New errors are calculated by multiplying initial errors by the desmear factor.
+    """ 
+    smoothIn = sx.smooth(In[1],window_len=winLenIntermed)
+    smoothErr = sx.smooth(In[2],window_len=winLenIntermed)
+    # In plus 1
+    Inp1 = [[],[],[]]
+    for j,q in enumerate(In[0]):
+        Inp1[0].append(q)
+        if j<len(Ins[0]): 
+            inp1 = smoothIn[j]*(Ios[1][j]/Ins[1][j])
+            inp1err= smoothErr[j]*(Ios[1][j]/Ins[1][j])
+        else:   # fills the array with the values from the last iteration
+            inp1 = smoothIn[j]
+            inp1err=In[2][j]
+        Inp1[1].append(inp1)
+        Inp1[2].append(inp1err)
+    Inp1 = np.array(Inp1)
+    
+    return Inp1
+
+def smear(Iin,qMin,deltaQ,wParams,wxm,wym,wnf):
+    """Smearing function.  Uses smearPt function is saxs module
+    for the heavy lifting"""
+    
+    # cubic spline for Iin
+    tckIin = interpolate.splrep(Iin[0],Iin[1],s=0)
+
+    # max q for smeared Iin
+    qMaxSm = np.sqrt(Iin[0][-1]**2-wym**2) - wxm
+    Ism=[[],[]]
+    q = qMin
+    while (q<=qMaxSm):
+        Ism[0].append(q)
+        Ism[1].append(sx.smearPt(q,tckIin,wParams,wym,wxm)/wnf)
+        q+=deltaQ
+    Ism = np.array(Ism)
+
+    return Ism
+    
+def readParamFile(parFileName):
+    """ Reads parameter file that specifies parameters 
+    for desmearing, plotting and output.
+    Returns a dicitonary with keys and parameter values.
+    Dictionary keys:
+        desmearN: number of desmearing interations
+        winLenIntermed: window length for smoothing intermediate results
+        winLenFinal: window length for smoothing final result
+        qLim: list containing lower and upper range for q values for desmearing
+        deltaQ: delta q value for desmeared data
+        bwCorrect: Boolean for beam width correction
+        plotParam: plot parameters for sx.saxsPlot [plot type, qLim, iLim]
+        smearFncPlot: Boolean for plot smearing function
+        showPlot: Boolean for show plots on screen
+        savePlot: Boolean for save plots as image file
+        imgFormat: Format for image files (ps, png, pdf, eps etcetera)
+    """
+    
+    params = {}
+    inFile = open(parFileName,'r')
+    # read all lines in parameter file
+    
+
+    lines = inFile.readlines()
+    paramLines = []
+    # Find non-empty lines that do not begin with '#' and add them to parameter lines list
+    for line in lines:
+        line = line.strip()
+        if line != '' and line[0] != '#':
+            paramLines.append(line)
+
+    # desmearing iterations
+    fields = paramLines[0].split()     
+    params['desmearN'] = int(fields[0])
+    
+    # window length for smoothing intermediate results - odd integer
+    fields = paramLines[1].split()     
+    params['winLenIntermed'] = int(fields[0])
+    
+    # window length for smoothing result of last iteration - odd integer
+    fields = paramLines[2].split()     
+    params['winLenFinal'] = int(fields[0])
+    
+    # q-range for desmearing
+    fields = paramLines[3].split()     
+    qMin = float(fields[0])
+    fields = paramLines[4].split()     
+    qMax = float(fields[0])
+    params['qLim'] = [qMin,qMax]
+    
+    # delta Q for desmeared curve
+    fields = paramLines[5].split()     
+    params['deltaQ'] = float(fields[0])
+    
+    # include beam-width correction
+    fields = paramLines[6].split()     
+    if re.match(r'[yY]',fields[0]):
+        params['bwCorrect'] = 1
+    else:
+        params['bwCorrect'] = 0
+    
+    ####### Plot Parameters, as used in saxs.saxsPlot
+    # q-range for plotting
+    fields = paramLines[7].split()     
+    qPlotMin = float(fields[0])
+    fields = paramLines[8].split()     
+    qPlotMax = float(fields[0])
+    if qPlotMax > qPlotMin:
+        qPlotLim = [qPlotMin,qPlotMax]
+    else:
+        qPlotLim = 0
+    # i-range for plotting
+    fields = paramLines[9].split()     
+    iPlotMin = float(fields[0])
+    fields = paramLines[10].split()     
+    iPlotMax = float(fields[0])
+    if iPlotMax > iPlotMin:
+        iPlotLim = [iPlotMin,iPlotMax]
+    else:
+        iPlotLim = 0
+    # plot type
+    fields = paramLines[11].split()     
+    plotType=fields[0]
+        
+    params['plotParam'] = [plotType,qPlotLim,iPlotLim]
+    
+
+    # plot smearing function
+    fields = paramLines[12].split()      
+    if re.match(r'[yY]',fields[0]):
+        params['smearFncPlot'] = 1
+    else:
+        params['smearFncPlot'] = 0
+    
+    # Show plots on screen
+    fields = paramLines[13].split()     
+    if re.match(r'[yY]',fields[0]):
+        params['showPlot'] = 1
+    else:
+        params['showPlot'] = 0
+        
+    # Save plots
+    fields = paramLines[14].split()     
+    if re.match(r'[yY]',fields[0]):
+        params['savePlot'] = 1
+    else:
+        params['savePlot'] = 0
+    
+    # Image format
+    fields = paramLines[15].split()   
+    params['imgFormat'] = fields[0]
+    
+    return params
+
+
+    
+def plotData(plotParam,Idsm,Ism,resids,qUnits,absI):
+    """Generates plots of original data, iteratively desmeared data,
+    smeared forms of itteratively desmeared data and plots of residuals"""
+
+    # lists of names
+    namesSm = ['expData']
+    namesDsm = ['expData']
+    namesResids=[]
+    for i in range(len(Ism)-1):
+        namesSm.append('I'+str(i+1)+'s')
+    for i in range(len(Ism)-1):     
+        namesDsm.append('I'+str(i+1))
+    if len(Idsm)>len(Ism):
+        namesDsm.append('I'+str(i+1)+' smoothed')
+        
+    for i in range(len(resids)):
+        namesResids.append('I'+str(i+1)+'s')
+
+    rmsRes=[[],[]]    
+    for j,res in enumerate(resids):
+        rmsRes[0].append(j+1)
+        rms = np.sqrt(np.dot(res[1],res[1]))
+        rmsRes[1].append(rms)
+    rmsRes = np.array(rmsRes)
+    
+
+    fig = plt.figure(figsize=(10,8))
+    fig.subplots_adjust(hspace=0.3,left=0.1,right=0.95)  
+    
+    plotPos = 221
+
+    colors = ['k','b','g','r','c','m','y']
+    ax1 = sx.saxsPlot(fig,plotPos,plotParam,Idsm,namesDsm,colors=colors,qUnits=qUnits,absI=absI) 
+    ax1.set_title('Desmeared Data')
+    
+    plotPos = 222
+    ax2 = sx.saxsPlot(fig,plotPos,plotParam,Ism,namesSm,colors=colors, qUnits=qUnits,absI=absI)
+    ax2.set_title('Smeared Data')
+    
+    plotPos =223
+    
+    ax3 = fig.add_subplot(plotPos)
+    ax3.set_color_cycle(colors[1:])
+    for i in range(len(resids)):
+        ax3.plot(resids[i][0],resids[i][1])
+        
+    if qUnits ==1:
+        qUnitsStr = "$q$ ($\AA^{-1}$)"
+    elif qUnits ==10:
+        qUnitsStr = "$q$ (nm$^{-1}$)"
+    else:
+        qUnitsStr = "$q$"        
+
+    ax3.set_xlabel(qUnitsStr)
+    ax3.set_ylabel('Normalized Residual')
+    ax3.set_title('Residuals')
+    leg = ax3.legend(namesResids)
+    
+    for t in leg.get_texts():
+        t.set_fontsize('small')    # the legend text fontsize
+
+    plotPos =224
+    
+    ax4 = fig.add_subplot(plotPos)
+    ax4.plot(rmsRes[0],rmsRes[1])
+    ax4.set_xlabel('Iteration')
+    ax4.set_ylabel('RMS Residual')
+    ax4.set_title('RMS Residuals')
+            
+    return fig
+    
+def plotSmearFuncs(wParams,wym,wxm):
+    """Generates a plot of the weighting functions assumed for the desmearing"""
+
+    fig = plt.figure(figsize=(6,6))
+    plt.subplots_adjust(hspace=0.2)      
+    
+    plotPos = 210
+    if wym>0:
+        plotPos +=1
+        ax1=sx.plotBeamLengthProfile(fig,plotPos,wParams,wym)
+    
+    if wxm>0:
+        plotPos +=1
+        ax2=sx.plotBeamWidthProfile(fig,plotPos,wParams,wxm,wym)
+        
+    return fig
+
+def logOutput(params,wParams,expDataFileName, logFileName):
+    """Outputs desmearing information to a text file.  """
+
+    timeFormat = '%a, %d %b %Y, %I:%M %p'
+    
+    logFile = open(logFileName,'w')
+    
+    print >> logFile, "# Desmeared data"
+    print >> logFile, "# " + time.strftime(timeFormat)  + "\n#"
+    if expDataFileName == None:
+    	print >> logFile, '# Input from standard input'
+    else:
+    	print >> logFile, "# Input file: " + expDataFileName
+    print >> logFile, "# Desmearing interations: " + str(params['desmearN'])    
+    if params['winLenIntermed'] <3:
+        print >> logFile, "# No smoothing of intermediate results"
+    else:
+        print >> logFile, "# Window length for smoothing intermediate results: " + str(params['winLenIntermed'])
+    if params['winLenFinal']:
+        print >> logFile, "# No smoothing of final curve"
+    else:
+        print >> logFile, "# Window length for smoothing final curve: " + str(params['winLenFinal'])
+    print >> logFile, "# Q-range for desmearing: " + str(params['qLim'][0]) + "--" + str(params['qLim'][1])
+    print >> logFile, "# Beam-length smearing profile: ",
+    if wParams[0]==0:
+        print >> logFile, "None"
+    elif wParams[0]== "sig":
+        print >> logFile, "Sigmoidal; a = " + str(wParams[1]) + " ; b = " + str(wParams[2])
+    elif wParams[0] == "trap":
+        print >> logFile, "Trapezoidal; a = " + str(wParams[1]) + " ; b = " + str(wParams[2])
+    print >> logFile, "# Detector slit length = " + str(wParams[4])
+    print >> logFile, "# Beam half-width = " + str(wParams[3])
+    
+    logFile.close()
+
+if __name__=="__main__":
+    main()
+
+        

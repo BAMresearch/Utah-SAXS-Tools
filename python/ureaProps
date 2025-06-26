@@ -1,0 +1,149 @@
+#! /Library/Frameworks/Python.framework/Versions/Current/bin/python
+
+# A Python script to calculate mass density and
+# and X-ray and neutro scattering densities of aqueous urea concentrations in
+# pure H2O or H2O/D2O mixtures.
+#  (c) 2011 by David P. Goldenberg
+#  Please send feature requests, bug reports, or feedback to this address:
+#           Department of Biology
+#           University of Utah
+#           257 South 1400 East
+#           Salt Lake City, UT
+#     
+#           goldenberg@biology.utah.edu
+#     
+#  This software is distributed under the conditions of the BSD license.
+#  Please see the Utah SAXS Tools documentation for further details.
+
+#  Modified 8 December 2011 so that D2O concentration is specified as 
+#  volume fraction of total solution, not volume or mass fraction of water component.
+
+import sys
+import string
+import soln
+from optparse import OptionParser
+
+
+info = """ureaProps, a Python script to calculate mass density and  
+        X-ray and neutron scattering densities of aqueous urea solutions. 
+        Requires 1 input argument, the molar urea concentration
+        Options:
+            -h, --help   show this help message and exit
+            -i, --info   Show more help information.
+            --vfd=VFD2O  D2O concentration as volume fraction of solution
+        By default, assumes that urea solution is made up in pure H2O.
+        
+        Uses data of:
+            Gucker, Jr., F. T., Gage, F. W. & Moser, C. E. (1938). 
+            The densities of aqueous solutions of urea at 25 and 30 and 
+            the apparent molal volume of urea. J. Am. Chem. Soc., 60, 2582-2588. 
+            http://dx.doi.org/10.1021/ja01278a008
+        to calculate density of urea solutions in H2O at 25 C
+        and data of:
+            Kell, G. S. (1967). Precise representation of volume properties 
+            of water at one atmosphere. J. Chem. Eng. Data, 12, 66-69. 
+            http://dx.doi.org/10.1021/je60032a018
+            
+            Kell, G. S. (1975). Density, thermal expansivity, and compressibility
+            of liquid water from 0 to 150 C: Correlations and tables for atmospheric 
+            pressure and stauration reviewed and expressed on 1968 temperature scale. 
+            J. Chem. Eng. Data, 20, 97-105. 
+            http://dx.doi.org/10.1021/je60064a005
+        For densities of H2O and D2O at 25 C.  Applies a small fudge factor to adjust
+        the Gucker et al. data so that 0 M urea density matches the Kell data at 25 C.
+        Assumes that volumes of H2O and D2O add ideally, with and without urea.
+        
+        """
+                
+
+####### some constants
+densH2O = 0.997045  # mass density of H2O at 25 C
+densD2O= 1.10441     # mass density of D2O at 25 C
+
+Mh2o = 18.0151528  # molecular weight of H2O in g/mol
+Md2o = 20.027604  # molecular weight of D2O in g/mol  
+Mu = 60.056     # molecular weight of urea
+
+def main():
+    parser = OptionParser()
+    parser.add_option("-i", "--info", action="store_true", dest="showInfo", default=False,
+                    help ="Show more help information.")
+    
+    parser.add_option("--vfd", action="store", dest="vfd2o", type=float, default=None,
+                    help ="D2O concentration as volume fraction of solution. Default is 0")
+   
+    (options,args) = parser.parse_args()
+    
+    if options.showInfo:
+        sys.exit(info)
+    
+    message = '\nureaProps, a Python script to calculate mass density and \n' + \
+                'X-ray scattering densities of aqueous urea solutions. \n' +\
+                'Requires 1 input argument, the molar urea concentration \n' +\
+                'For help, type > ureaProps -i'
+    if len(args) != 1:
+        sys.exit(message)
+    
+    cUrea = float(args[0])
+    
+    ###### check that the specified concentrations are valid  ########
+    if not(0 <= cUrea <= 9):
+        message = 'Sorry, the urea concentration must lie between 0 and 9 M.'
+        sys.exit(message)
+        
+
+    elif options.vfd2o:
+        vfd = options.vfd2o
+        dens = soln.ureaSolnDens(cUrea, vfd)
+        if dens < 0.0:
+            vfdMax = -1.0*dens
+            message = 'Sorry for a %3.2f M urea solution, ' % cUrea + \
+                        'the maximum volume fraction of D2O is %5.4f' % vfdMax
+            sys.exit(message)
+        if vfd <0:
+            message = 'Sorry, the volume fraction D2O cannot be less than 0.'
+            sys.exit(message)
+    else:
+        vfd = 0.0
+        dens = soln.ureaSolnDens(cUrea,vfd)
+    
+    rhoX = soln.rhoXrayUrea(cUrea,vfd)
+    rhoN = soln.rhoNeutUrea(cUrea,vfd)    
+    
+    ############ Calculation of average scattering length for a urea molecule  #########
+    # corrected for D2O composition
+    mUrea = cUrea*soln.Mu/1000.0 # mass of urea per cm^3
+    mWater = dens - mUrea  # mass of water per cm^3
+
+    mD2O = vfd*densD2O       # mass of D2O per cm^3
+    mH2O = mWater - mD2O    # mass of H2O per cm^3
+    volWat = mD2O/densD2O + mH2O/densH2O  # total volume of water per cm^3
+    molesD = 2*mD2O/soln.Md2o  # moles of D per cm^3 from D2O
+    molesH = 2*mH2O/soln.Mh2o + 4*mUrea/soln.Mu  #moles of H per cm^3 from H2O and urea
+    fMolesD = molesD/(molesD + molesH)  # fraction of D atoms 
+    
+    bUrea = soln.bu + 4*fMolesD*(soln.bD-soln.bH)   # average urea neutron scattering length
+    vUrea = 7.5E-23             # Molecular volume of urea, cm^3
+    rhoNurea = bUrea/vUrea
+    ureaNcontrast = rhoNurea - rhoN
+    
+    
+    ############ Output #############
+    if vfd == 0.0:    
+        print '%5.3g M urea at 25 C:' % cUrea
+    elif options.vfd2o:
+        print '%5.3g M urea in %g percent D2O (v/v) at 25 C:' % (cUrea, 100.0*vfd)
+    print '\tMass density = %7.6g g/cm-3' % dens
+    print '\tTotal volume fraction of water = %-4.3g' % volWat
+    print '\tTotal fraction of H as deuterium = %-4.4g' % fMolesD
+    
+    print '\n\tX-ray scattering density = %8.5g cm-2' % rhoX
+    print '\tNeutron scattering density = %8.5g cm-2' % rhoN
+    
+#     print
+#     print '\tAverage urea neutron scattering length = %8.5g cm' % bUrea
+#     print '\tAverage urea neutron scattering dens = %8.5g cm-2' % rhoNurea
+#     print '\tUrea neutron contrast =  %8.5g cm-2' % ureaNcontrast
+    
+if __name__=="__main__":
+    main()

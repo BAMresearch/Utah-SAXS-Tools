@@ -1,0 +1,119 @@
+#! /Library/Frameworks/Python.framework/Versions/Current/bin/python
+
+#  A python script to calculate and plot the small-angle scattering
+#  structure factor function for a hard-sphere fluid
+
+#  (c) 2009-2011 by David P. Goldenberg
+#  Please send feature requests, bug reports, or feedback to this address:
+#           Department of Biology
+#           University of Utah
+#           257 South 1400 East
+#           Salt Lake City, UT
+#     
+#           goldenberg@biology.utah.edu
+#     
+#  This software is distributed under the conditions of the BSD license.
+#  Please see the documentation for further details.
+
+import sys
+from optparse import OptionParser
+import numpy as np 
+import matplotlib.pyplot as plt
+import saxs as sx
+
+info = """ saxsSFdiv
+      A Python script to calculate and plot the predicted structure factor
+      for a solution of hard spheres.
+
+      The program requires two input arguments:
+      phi: the volume fraction occupied by hard spheres
+      r: the radius of the hard spheres
+      The calculated structure factor is plotted and directed to standard output
+      
+      Options:
+      -h, --help            show this help message and exit
+      -i, --info            Show more help information.
+      --qMin=QMIN           Minimum q-value, default = 0
+      --qMax=QMAX           Maximum q-value, default = 0.5
+      --deltaQ=DELTAQ       Spacing of q-values, default = 0.0025
+      -t PLOTTYPE, --plot=PLOTTYPE
+                            Plot type. Options are none, linear, log, loglog,
+                            guinier, kratky. Default is linear
+  """
+
+def main():
+    ##### Parse options and arguments   ##########
+    parser = OptionParser()
+    
+    parser.add_option("-i", "--info", action="store_true", dest="showInfo", default=False,
+                        help ="Show more help information.")
+    parser.add_option("--qMin", action = "store", type = "float", 
+                   dest="qMin", default = 0.0, 
+                   help="Minimum q-value, default = 0")
+    parser.add_option("--qMax", action = "store", type = "float", 
+                   dest="qMax", default = 0.5, 
+                   help="Maximum q-value, default = 0.5")
+    parser.add_option("--deltaQ", action = "store", type = "float", 
+                   dest="deltaQ", default = 0.0025, 
+                   help="Spacing of q-values, default = 0.0025")
+
+    parser.add_option("-t", "--plot", action = "store", type = "string", 
+                       dest="plotType", default = "linear", 
+                       help="Plot type. Options are none, linear, log, "\
+                            + "loglog, guinier, kratky. Default is linear")    
+   
+    (options, args) = parser.parse_args()
+
+    
+    if options.showInfo:
+        sys.exit(info)
+        
+    message = '\n saxsSFdiv A Python script to calculate the ' \
+                + 'predicted structure factor for a solution of hard spheres.\n'\
+                +  'The program requires two input arguments:\n' \
+                +  '   phi: the volume fraction occupied by hard spheres\n'\
+                +  '   r: the radius of the hard spheres \n'
+
+
+    if len(args) != 2:
+        sys.exit(message)
+    
+    phi = float(args[0])
+    r = float(args[1])
+    
+    ###### Window Title
+
+    windowTitle = 'SAXS Structure Factor'
+    
+    q = np.arange(options.qMin, options.qMax+options.deltaQ, options.deltaQ)
+    strFact = sx.hsStructFact(q, phi, r) 
+              
+    #### Plots   
+    if options.plotType != 'none':
+        plotParam = [options.plotType,0,0]
+        
+        strFactLegend = "Hard sphere structure factor \n"
+        strFactLegend += '$\phi = $ %4.2f \n' %(phi)
+        strFactLegend += '$r = $ %4.2f ' %(r)
+        
+        
+        fig = plt.figure()
+        plotPos = 111
+        ax1 = sx.saxsPlot(fig,plotPos, plotParam, [[q,strFact]],
+                            legends=[strFactLegend])
+
+        ax1leg=ax1.legend(loc='lower right',bbox_to_anchor=(1.0,0.0))
+        for t in ax1leg.get_texts():
+            t.set_fontsize('small')    # the legend text fontsize
+
+        fig.canvas.set_window_title(windowTitle) 
+        plt.show()
+        
+    #### output
+    print "# q       \tStr_Factor "
+    for i, qval in enumerate(q):
+        print '%-8.5e \t %8.5e' % (qval, strFact[i])
+
+if __name__=="__main__":
+    main()
+

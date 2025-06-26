@@ -1,0 +1,179 @@
+#! /Library/Frameworks/Python.framework/Versions/Current/bin/python
+
+#   A Python script to average two or more SAXS data files
+    
+#  (c) 2009-2011 by David P. Goldenberg
+#  Please send feature requests, bug reports, or feedback to this address:
+#           Department of Biology
+#           University of Utah
+#           257 South 1400 East
+#           Salt Lake City, UT
+#     
+#           goldenberg@biology.utah.edu
+#     
+#  This software is distributed under the conditions  of the BSD license.
+#  Please see the documentation for further details.
+
+import sys
+from optparse import OptionParser
+
+import matplotlib.pyplot as plt
+import saxs as sx
+
+from uncertainties import unumpy
+
+info = """ saxsAvg
+      A Python script to average two or more SAXS data files
+      The program requires one or more input arguments, the names of the data files.
+      Options:
+      -h, --help                        show a help message and exit
+      -i, --info                        Show more help information.
+      -r, --raw                         Raw input file. Default is pdh format
+      --so                              Direct output to system standard output
+      -t PLOTTYPE, --plot=PLOTTYPE      Plot type. Options are none, linear, log, loglog,
+                                                    guinier, kratky
+    
+      The average profile is directed to a new file, 
+      or to standard output if the -s (--stdo) option is chosen.
+      Plots of the original and average profiles are automatically generated
+      using the matplotlib python library.
+      The default behavior is to assume the data files are in PDH format
+      If the file names are preceded by the argument -r, the program assumes the files 
+      are in a "raw" format and only looks for rows containing exactly three fields.
+    
+      After reading the data files, the program trims all of them to a 
+      common length and range of q-values.  
+      The data files must use the same q-value increments.
+      The profiles are then added and averaged. 
+      Errors are calculated by propogation from the input data, 
+      using the uncertainties package.
+      """
+    
+def main():
+
+    ##### Parse options and arguments   ##########
+    parser = OptionParser()
+    parser.add_option("-i", "--info", action="store_true", dest="showInfo", default=False,
+                        help ="Show more help information.")
+    
+    parser.add_option("-r", "--raw", action = "store_true", dest="rawFile", default = False, 
+                       help="Raw input file. Default is pdh format")
+    
+    parser.add_option("--so", action = "store_true", dest="stdo", default = False, 
+                       help="Direct output to system standard output")
+                      
+    parser.add_option("-t", "--plot", action = "store", type = "string", 
+                       dest="plotType", default = "linear", 
+                       help="Plot type. Options are none, linear, log, loglog, guinier, kratky")
+ 
+    (options, args) = parser.parse_args()
+
+
+    if options.showInfo:
+        sys.exit(info)
+        
+    if not(len(args) > 1):
+        message = """\n saxsAvg: A python script to average two or more SAXS profiles.  \n For help, type > saxsAvg.py -i"""
+        sys.exit(message)
+
+    fileNames = args
+    
+    ###### Window Title
+    windowTitle = 'SAXS Average: ' + fileNames[0] 
+    for name in fileNames[1:]:
+        windowTitle = windowTitle + ', ' + name
+    
+    #### construct output file name, unless standard output option is selected
+    if options.stdo:
+        outFileName = None
+    else:
+        rootName = args[0].rpartition('.')[0]
+        if options.rawFile:
+            outFileName = rootName + "_avg.txt"
+        else:
+            outFileName = rootName + "_avg.pdh"
+    
+    
+    dataSets =[]
+    headers = []
+    for name in fileNames:
+        if options.rawFile:
+            data = sx.readQIE(name)
+            dataSets.append(data)
+        else:
+            header, data = sx.readPdh(name)
+            dataSets.append(data)
+            headers.append(header)
+
+
+    qMin = dataSets[0][0][0]
+    qMax = dataSets[0][0][-1]
+
+    for data in dataSets:
+        qMin = max(qMin, data[0][0])
+        qMax = min(qMax, data[0][-1])
+    
+    dataTrim = []
+    for data in dataSets:
+        trim=[[],[],[]]
+        for i, q in enumerate(data[0]):
+            if (qMin <= q <= qMax):
+                trim[0].append(data[0][i])
+                trim[1].append(data[1][i])
+                trim[2].append(data[2][i])
+        ### Create unumpy array with uncertainties
+        trimIu = unumpy.uarray((trim[1],trim[2]))
+        dataTrim.append([trim[0],trimIu])
+    
+    
+    n = len(dataTrim)
+    sumIu = dataTrim[0][1]
+    for j in range(n-1):
+        sumIu = sumIu + dataTrim[j+1][1]
+    avgIu= sumIu/n
+    
+    avgData = [dataTrim[0][0],unumpy.nominal_values(avgIu),unumpy.std_devs(avgIu)]
+
+    ####### Label absolute intensity only if all profiles are normalized to absolute intensity  ####
+    absI = False
+    if not options.rawFile:
+        absI = True
+        for head in headers:
+            if head[2][2] == 0:
+                absI = False
+
+
+    ##### Plots
+    if options.plotType != 'none':
+        plotParam = [options.plotType,0,0]
+        if options.rawFile:
+            qUnits=0
+        else:
+            qUnits = headers[0][4][4]
+        
+        fig = plt.figure()
+        plotPos = 211
+        ax1 = sx.saxsPlot(fig,plotPos, plotParam, dataSets,legends=fileNames, qUnits=qUnits, absI=absI)
+        plotPos=212
+        ax2 = sx.saxsPlot(fig,plotPos, plotParam, [avgData],
+                            legends=['averageData'], qUnits=qUnits, absI=absI)
+        fig.subplots_adjust(bottom=0.1, hspace=0.25)
+        
+        fig.canvas.set_window_title(windowTitle) 
+        plt.show()
+
+
+    if options.rawFile:
+        sx.writeQIE(outFileName,avgData)
+    else:
+        header = headers[0]
+        header[2][0]=len(avgData[0])
+        if absI:
+            header[2][2] = 1
+        else:
+            header[2][2] = 0
+        sx.writePdh(outFileName, header,avgData)
+        
+
+if __name__=="__main__":
+    main()

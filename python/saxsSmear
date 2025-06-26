@@ -1,0 +1,532 @@
+#! /Library/Frameworks/Python.framework/Versions/Current/bin/python
+
+# A python script to predict smearing of SAXS data from a line-collimated camera
+
+#  (c) 2009-2011 by David P. Goldenberg
+#  Please send feature requests, bug reports, or feedback to this address:
+#           Department of Biology
+#           University of Utah
+#           257 South 1400 East
+#           Salt Lake City, UT
+#     
+#           goldenberg@biology.utah.edu
+#     
+#  This software is distributed under the conditions of the BSD license.
+#  Please see the documentation for further details.
+
+from optparse import OptionParser
+import sys
+import os.path
+import re
+import time
+
+import numpy as np
+from scipy import interpolate
+import matplotlib.pyplot as plt    
+import saxs as sx
+
+
+info = """ saxsSmear
+    A python script to predict smearing of SAXS data from a line-collimated camera
+
+     Simulates smearing due to:
+      1. The length and shape of the beam profile 
+      2. The finite width of the "detector slit", (equivalent to the width of the
+          integration profile used with a two dimensional detector or image plate), 
+          which further smears the scattering profile
+      3. The beam width
+    
+     In default mode, two arguments are required:
+      The name of a parameter file with smearing, plotting and output options.
+      The name of the input file with saxs profile to be smeared.
+    
+    Outputs the smeared profile to a text file.  
+    Optionally shows and saves plots of input and smeared profiles
+    And the beam profiles used for smearing.
+    
+    Options:
+      -h, --help  show a help message with options and exit
+      -i, --info  Show more help information and exit.
+      -s, --si    Read data from system standard input and write to standard
+                  output
+      --so        Direct output to system standard output
+      --iMode     Interactive mode
+     
+    In interactive mode (--iMode), the user is prompted to input file name and 
+    options interactively from standard input.
+    The user is also offered the option to save the parameters in a file
+    for the default mode.
+    The interactive mode does not allow options for plot type and scale limits.
+    
+    Includes two options to describe the shape of the beam-length profile
+     1: A trapazoid, defined by two parameters a and b. 
+     a is the long (bottom) side of the trapezoid, and b is the short side.
+     a and b are specified in q-units. a and be may be specified in either order
+     If a=b, beam profile is a rectangle
+     typical values are a=0.4, b=0.3
+    
+     2: A "double sigmoid" function to to describe the profile:
+     B(q)=(1+a)/(a+exp(abs(q)/b)
+     a and b are parameters that define shape.
+     typical values are a=200, b=0.03 in A-1 Q units
+    
+    The beam-width profile is described by a Gaussian function, specified
+    by the half-width at half-height
+    
+    A sample parameter file:
+    
+       #  Parameter file for saxsSmear.py
+        t		 # beam-length profile type: 't' trapezoidal or 's' sigmoidal
+        0.3 	 # beam-length parameter a
+        0.4		 # beam-length parameter b
+        0.0		 # half-width of Gaussian beam-width profile
+        0.1		 # detector slit length
+        #	Plot limits (limits are ignored if max is not greater than min)
+        0.0 		 # q min for plotting
+        0.0 		 # q max for plotting
+        0.0 		 # I min for plotting
+        0.0 		 # I max for plotting
+        #	Plot output options
+        log 		 # plot type: 'linear', 'log', 'loglog', 'guinier' or 'kratky'
+        y		 # Show plots (on screen): 'y' or 'n'
+        n		 # Save plots  'y' or 'n'
+        svg		 # Image format for plots: 'emf', 'eps', 'pdf', 'png', 'ps', 'raw', 'rgba', 'svg', 'svgz' 
+    
+    The parameter file can contain comment lines that begin with # and blank lines.  
+    But, all parameters must be listed in the specified order.
+    
+    Input data file is assumed to contain q and I values in the first two columns.
+    The first line in the input file is ignored, as are lines that begin with #
+    
+    
+    """
+
+def main():
+
+    # handle arguments and options with OptionParser
+    parser = OptionParser()
+    parser.add_option("-i", "--info", action="store_true", dest="showInfo", default=False,
+                help ="Show more help information.")
+    parser.add_option("-s", "--si", action = "store_true", dest="stdin", default = False, 
+                help="Read data from system standard input and write to standard output")  
+    parser.add_option("--so", action = "store_true", dest="stdo", default = False, 
+                       help="Direct output to system standard output")                       
+    parser.add_option("--iMode", action = "store_true", dest="iMode", default = False, 
+                       help="Interactive mode")                       
+
+    (options, args) = parser.parse_args()
+    
+    if options.showInfo:
+        sys.exit(info)
+
+
+    message = '\n saxsSmear.py: A Python script to simulate the smearing effects '\
+                + 'from a line-colimated instrument. \n' \
+                + ' For more information, type > saxsSmear -i'
+    
+
+    #### collect parameters and assign file names, according to options
+    # interactive mode
+    if options.iMode:
+        dataFileName, params = iModeParams()
+        rootName = dataFileName.rpartition('.')[0]
+        outFileName = rootName+'_smear.txt'
+        print "\nThanks for your input! This may take a minute or few."
+    # standard mode
+    else:
+        if options.stdin:
+            if len(args) == 1:
+                dataFileName = None
+                parFileName = args[0]
+                rootName = ''
+                outFileName = None
+            else:
+                sys.exit(message)
+        else:
+            if len(args) == 2:
+                parFileName = args[0]
+                dataFileName = args[1]
+                rootName = dataFileName.rpartition('.')[0]
+                outFileName = rootName+'_smear.txt'
+            else:
+                sys.exit(message)
+            if options.stdo:
+                outFileName = None
+
+    ###### Window Title
+    if dataFileName == None:
+        windowTitle = 'SAXS Smeared Data'
+    else:   
+        windowTitle = 'SAXS Smeared Data: ' + dataFileName
+
+                
+        params = readParamFile(parFileName)
+    
+    # For trapazoid beam profile, make sure that a > b
+    if (params['beamProfType'] == 'trap') and (params['a'] < params['b']):
+        params['a'], params['b'] = params['b'], params['a']
+
+    
+    wParams = [params['beamProfType'],params['a'],params['b'],params['bhw'],params['Ld']]
+
+    # read input saxs curve
+    iqInp=readUnsmeared(dataFileName)
+    
+    # calculate parameters for cubic spline represenation of the 
+    # input saxs curve
+    tckUnsm = interpolate.splrep(iqInp[0],iqInp[1],s=0)
+    
+    
+    # Determine the range over which the smearing weighting function is significant.
+    # I define this as values for which w(y) > eps*w(0)
+    # The function wYmax(a,b,Ld,eps) finds the maximum y value by this criterion
+    # eps=0.01 seems like a reasonable value
+    # The maximum x and y values define the range for which the smeared scattering intensity
+    # can be calculated
+    
+    eps = 0.01
+    wym =  sx.wYmax(wParams,eps)
+    wxm = sx.wXmax(params['bhw'],eps)
+
+    # Check that the maximum q value is large enough to survive smearing.   
+    qMaxMin = np.sqrt(wxm**2 + wym**2)
+    if qMaxMin >= iqInp[0][-1]:
+        message = '\nThe smearing function is too wide for the maximum q in the profile. \n' \
+                + 'Please try another set of smearing parameters.'                
+        sys.exit(message)
+
+    qMaxSm = np.sqrt(iqInp[0][-1]**2-wym**2) - wxm
+    
+    # Next calculate the integral of the y-weighting factor over the 
+    # values considered, to use for normalization.
+    # The x-weighting funciton (a Gaussian) is automatically normalized
+    wnf = sx.wNormFact(wParams,wym)
+
+    ##### Loop to smear data point-by-point
+    iqOutp=[[],[]]
+    for j,q in enumerate(iqInp[0]):
+        if (q<=qMaxSm):
+            iqOutp[0].append(q)
+            iqOutp[1].append(sx.smearPt(q,tckUnsm,wParams,wym,wxm)/wnf)
+    iqOutp = np.array(iqOutp)
+
+    ###### generate plots
+    if (params['showPlot'] or params['savePlot']):    
+        fig1 = plotData(params['plotParam'],iqInp,iqOutp,wParams,wym,wxm)
+        fig1.canvas.set_window_title(windowTitle)
+        if params['savePlot']:
+            plotFileName = rootName+'_smear.'+ params['imgFormat']
+            fig1.savefig(plotFileName,orientation='landscape')
+
+        if params['showPlot']:
+            plt.show()
+    
+    if outFileName != '':
+        dataOutput(iqOutp,outFileName)          
+        
+def readParamFile(parFileName):
+    """ Reads parameter file that specifies parameters 
+    for smearing, plotting and output.
+    Returns a dicitonary with keys and parameter values.
+    Dictionary keys:
+        beamProfType: s for sigmoidal, t for trapazoidal
+        a: beam profile parameter a
+        b: beam profile parameter b
+        bhw: beam half width
+        Ld: detector slit width
+        plotParam: plot parameters for sx.saxsPlot [plot type, qLim, iLim]
+        showPlot: Boolean for show plots on screen
+        savePlot: Boolean for save plots as image file
+        imgFormat: Format for image files (ps, png, pdf, eps etcetera)
+    """
+
+    params = {}
+    inFile = open(parFileName,'r')
+    # read all lines in parameter file
+    
+    lines = inFile.readlines()
+    paramLines = []
+    # Find non-empty lines that do not begin with '#' and add them to parameter lines list
+    for line in lines:
+        line = line.strip()
+        if line != '' and line[0] != '#':
+            paramLines.append(line)
+
+    fields = paramLines[0].split()
+    if re.match(r'[sS]',fields[0]):
+        params['beamProfType'] = 'sig'
+    else:
+        params['beamProfType'] = 'trap'
+
+    fields = paramLines[1].split()
+    params['a'] = float(fields[0])
+    
+    fields = paramLines[2].split()
+    params['b'] = float(fields[0])
+    
+    fields = paramLines[3].split()
+    params['bhw'] = float(fields[0])
+    
+    fields = paramLines[4].split()
+    params['Ld'] = float(fields[0])
+    
+    ####### Plot Parameters, as used in saxs.saxsPlot
+    # q-range for plotting
+    fields = paramLines[5].split()     
+    qPlotMin = float(fields[0])
+    fields = paramLines[6].split()     
+    qPlotMax = float(fields[0])
+    if qPlotMax > qPlotMin:
+        qPlotLim = [qPlotMin,qPlotMax]
+    else:
+        qPlotLim = 0
+    # i-range for plotting
+    fields = paramLines[7].split()     
+    iPlotMin = float(fields[0])
+    fields = paramLines[8].split()     
+    iPlotMax = float(fields[0])
+    if iPlotMax > iPlotMin:
+        iPlotLim = [iPlotMin,iPlotMax]
+    else:
+        iPlotLim = 0
+    # plot type
+    fields = paramLines[9].split()     
+    plotType=fields[0]
+    params['plotParam'] = [plotType,qPlotLim,iPlotLim]
+       
+    # Plot display and save options
+    # Show plots on screen
+    fields = paramLines[10].split()     
+    if re.match(r'[yY]',fields[0]):
+        params['showPlot'] = 1
+    else:
+        params['showPlot'] = 0
+        
+    # Save plots
+    fields = paramLines[11].split()     
+    if re.match(r'[yY]',fields[0]):
+        params['savePlot'] = 1
+    else:
+        params['savePlot'] = 0
+    
+    # Image format
+    fields = paramLines[12].split()   
+    params['imgFormat'] = fields[0]
+    
+    inFile.close()
+    
+    return params
+    
+def iModeParams():
+    """ Collects parameters for smearing, plotting and output,
+    along with data file name,
+    interactively from standard input.
+    Returns data file name and a dicitonary with keys and parameter values.
+    Dictionary keys:
+        beamProfType: s for sigmoidal, t for trapazoidal
+        a: beam profile parameter a
+        b: beam profile parameter b
+        bhw: beam half width
+        Ld: detector slit width
+        plotParam: plot parameters for sx.saxsPlot [plot type, qLim, iLim]
+        showPlot: Boolean for show plots on screen
+        savePlot: Boolean for save plots as image file
+        imgFormat: Format for image files (ps, png, pdf, eps etcetera)
+    The user is not prompted for plotParam values. These are set to default values.
+    For more control over plots, standard mode must be used.
+    The user is also prompted to save a parameter file with the specified settings,
+    which can the be used to run the program in the standard mode.
+    """
+
+    params = {}
+
+    print "saxsSmear.py: A python script to calculate smearing effects on SAXS profiles."
+    print "Interactive input mode. Type control-c to exit. \n"
+
+    dataFileName = raw_input("Input file name: ").strip()
+ 
+    ok = os.path.isfile(dataFileName)
+    while ok !=True:
+        dataFileName=raw_input("Sorry. I can't find that file. Please try again: ").strip()
+        ok = os.path.isfile(dataFileName)
+    rootName = dataFileName.rpartition('.')[0]
+    
+    beamProfType = raw_input("Beam-length profile type (t or s): ").strip()
+    if re.match(r'[sS]',beamProfType):
+        params['beamProfType'] = 'sig'
+        a = raw_input("Sigmoidal beam-length pramameter a: ").strip()
+        params['a']=float(a)
+        b = raw_input("Sigmoidal beam-length pramameter b: ").strip()
+        params['b']=float(b)
+    else:
+        params['beamProfType'] = 'trap'
+        a = raw_input("Trapazoidal beam-length pramameter a (long side): ").strip()
+        params['a']=float(a)
+        b = raw_input("Trapazoidal beam-length pramameter b (short side): ").strip()
+        params['b']=float(b)
+        
+    bhw = raw_input("Beam half-width: ").strip()
+    params['bhw']=float(bhw)
+    Ld = raw_input("Detector slit-length: ").strip()
+    params['Ld']=float(Ld)
+    showPlot = raw_input("Show plots of data and weighting functions? (y or n): ").strip()
+    if re.match(r'[yY]',showPlot):
+        params['showPlot'] = 1
+        savePlot = raw_input("Save an image file for plots? (y or n): ").strip()
+        if re.match(r'[yY]',savePlot):
+            params['savePlot'] = 1
+            print "Enter a file name extension to determine the image file format."
+            imgFormat = raw_input("Valid types are: 'emf', 'eps', 'pdf', 'png', 'ps', 'raw', 'rgba', 'svg', 'svgz' \n").strip()
+            validSuffs = [ 'emf', 'eps', 'pdf', 'png', 'ps', 'raw', 'rgba', 'svg', 'svgz'] 
+            ok = (imgFormat in validSuffs)
+            while ok != True:
+                print "Sorry. '" + imgFormat + "' is not a valid format type."
+                print "Valid types are: 'emf', 'eps', 'pdf', 'png', 'ps', 'raw', 'rgba', 'svg', 'svgz'"
+                imgFormat = raw_input("Please enter one of these extensions: ").strip()
+                ok = (imgFormat in validSuffs)
+            params['imgFormat'] = imgFormat
+            plotFileName = outFileName = rootName+'_smear.' + imgFormat
+            print "The smeared data will be saved as: " + plotFileName +"\n"
+            
+        else:
+            params['savePlot']=0
+            params['imgFormat'] = 'ps'
+    else:
+        params['showPlot'] = 0
+        params['savePlot'] = 0
+    saveSmeared = raw_input("Save smeared profile as a text file? (y or n): ").strip()
+    if re.match(r'[yY]',saveSmeared):
+
+        outFileName = outFileName = rootName+'_smear.txt'
+        print "The smeared data will be saved as: " + outFileName
+    else:
+        outFileName = ''
+    
+    params['plotParam']=['log',0,0]
+    
+    saveParams = raw_input("Would you like to save these settings in a parameter file? (y or n): ").strip()
+    if re.match(r'[yY]',saveParams):
+        paramFileName = raw_input("Please enter a file name: ").strip()
+        saveParamFile(params, paramFileName)
+
+    return dataFileName, params
+
+
+
+def readUnsmeared(dataFileName):
+    """ reads input scattering curve from input file/
+    Ignores first line and any line that begins with #
+    Checks for lines that contain floating point numbers in first two white-space delimitted fields
+    Returns a two-dimensional array with the q-values in the first list
+    and the I values in the second"""
+    
+    if dataFileName == None:
+        inFile = sys.stdin
+    else:
+        inFile = open(dataFileName,'r')
+        
+    q=[]
+    I=[]
+    
+    
+    extension = dataFileName.rpartition('.')[-1]
+    if extension == 'pdh':
+        for i in range(5):
+            line = inFile.readline() # ignore first 5 lines
+    else:
+        line = inFile.readline() # ignore first line
+    for line in inFile.readlines():
+        line = line[:-1]    # Chop newline character
+        fields = line.split()     # Split line into fields
+        if (fields[0][0] != "#"):  # check that the first field does not begin with a #
+            if ((len(fields) >=2)): # check that there are at least two fields          
+                try:  # checks that fields can be cast as floating point numbers
+                    thisQ = float(fields[0])
+                    thisI = float(fields[1])
+                    q.append(thisQ)
+                    I.append(thisI)
+                except ValueError:
+                    continue
+    
+    inFile.close()
+    
+    return np.array([q,I])
+    
+def plotData(plotParam,iqInp,iqOutp,wParams,wym,wxm):    
+    """ Generates figure object for plotting """
+    plotCt = 1
+    if wym > 0:
+        plotCt +=1
+    if wxm > 0:
+        plotCt +=1
+        
+    fig = plt.figure(figsize=(8,1+2.5*plotCt))
+    fig.subplots_adjust(hspace=0.4, bottom=0.05, top=0.95)
+    
+    colors = ['r','b']
+    plotPos = plotCt*100+11
+    legends = ['Unsmeared', 'Smeared']
+    ax1 = sx.saxsPlot(fig,plotPos,plotParam,[iqInp, iqOutp], legends=legends, colors=colors)    
+    ax1.set_title("Scattering Curve")
+    
+    if wym>0:
+        plotPos +=1
+        sx.plotBeamLengthProfile(fig,plotPos,wParams,wym)
+    
+    if wxm>0:
+        plotPos +=1
+        sx.plotBeamWidthProfile(fig,plotPos,wParams,wxm,wym)
+        
+    return fig
+
+
+def dataOutput(iqOutp,outFileName):
+    """Writes output file with smeared profile"""
+    if outFileName != None:
+        outFile = open(outFileName,'w')
+    else: 
+        outFile = None
+    print >> outFile, "#q \t I_smear"
+    for j,q in enumerate(iqOutp[0]):
+        print >> outFile, "%-6.3f \t %-8.3E " % (q, iqOutp[1][j])
+        
+def saveParamFile(params,paramFileName):
+
+    timeFormat = '%a, %d %b %Y'
+    if params['showPlot']:
+        showPlot = 'y'
+    else:
+        showPlot = 'n'
+    if params['savePlot']:
+        savePlot = 'y'
+    else:
+        savePlot = 'n'
+
+    paramFile = open(paramFileName,'w')
+    print >> paramFile, "#  Parameter file for saxsSmear.py"
+    print >> paramFile, "#  Created " + time.strftime(timeFormat) + " by saxsSmear.py in interactive mode"
+    print >> paramFile, params['beamProfType'][0] + "\t\t # beam-length profile type: 't' trapezoidal or 's' sigmoidal"
+    print >> paramFile, str(params['a']) + "\t\t # beam-length parameter a"
+    print >> paramFile, str(params['b']) + "\t\t # beam-length parameter b"
+    print >> paramFile, str(params['bhw']) + "\t\t # half-width of Gaussian beam-width profile"
+    print >> paramFile, str(params['Ld']) + "\t\t # detector slit length"
+    print >> paramFile, "#	Plot limits (limits are ignored if max is not greater than min)"
+    print >> paramFile,  "0.0 \t\t # q min for plotting"
+    print >> paramFile,  "0.0 \t\t # q max for plotting"
+    print >> paramFile,  "0.0 \t\t # I min for plotting"
+    print >> paramFile,  "0.0 \t\t # I max for plotting"
+    print >> paramFile, "#	Plot output options"   
+    print >> paramFile, "log \t\t # plot type: 'linear', 'log', 'loglog', 'guinier' or 'kratky'"
+    print >> paramFile, showPlot + "\t\t # Show plots (on screen): 'y' or 'n'"
+    print >> paramFile, savePlot + "\t\t # Save plots  'y' or 'n'"
+    print >> paramFile, params['imgFormat'] + "\t\t # Image format for plots:" \
+                                            + " 'emf', 'eps', 'pdf', 'png', 'ps',"\
+                                            + " 'raw', 'rgba', 'svg', 'svgz' "
+    
+    paramFile.close()
+
+
+if __name__=="__main__":
+    main()
+
+        

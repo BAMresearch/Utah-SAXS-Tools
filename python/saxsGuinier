@@ -1,0 +1,384 @@
+#! /Library/Frameworks/Python.framework/Versions/Current/bin/python
+
+
+#   A Python script to generate a Guinier plot and fit data.
+
+#  (c) 2009-2011 by David P. Goldenberg
+#  Please send feature requests, bug reports, or feedback to this address:
+#           Department of Biology
+#           University of Utah
+#           257 South 1400 East
+#           Salt Lake City, UT
+#     
+#           goldenberg@biology.utah.edu
+#     
+#  This software is distributed under the conditions of the BSD license.
+#  Please see the documentation for further details.
+ 
+
+import sys
+from optparse import OptionParser
+
+import numpy as np 
+from scipy.optimize import curve_fit
+import matplotlib.pyplot as plt
+
+from uncertainties import correlated_values
+import saxs as sx
+import soln
+
+
+info = """ saxsGuinier.py
+      A Python script to generate a Guinier plot and fit data.
+      The program requires three inputs, 
+      The min and max Q values for fitting
+      and the name of the input data file (unless the standard input option is used)
+      Options:
+          -h, --help            show help message and exit
+          -i, --info            Show more help information.
+          -r, --raw             Raw input file. Default is pdh format
+          -s, --si              Read data from system standard input
+          -p IMGFILENAME, --pfile=IMGFILENAME
+                                Image file name. Suffix specifies format. Default is None
+          -d, --dexp            Perform double-exponential fit in addition to Guinier fit
+          --noErr               no I error data.
+          --conc=CONC           Particle concentration, mg/mL.  If provided, program
+                                calculates molecular weight.
+          --mw=MW               Particle relative molecular mass.  If provided,
+                                program calculates concentation.
+          --vbar=VBAR           Partial specific volume, cm^3/g.  Used for molecular
+                                weight or concentration calculation. Default = 0.74.
+          --rhoSolv=RHOSOLV     Scattering density of solvent, with units cm-2. Used
+                                for molecular weight or concentration calculation.
+                                Default is 9.4E10 cm-2, X-ray scattering density of water.
+          --rhoMol=RHOMOL       Scattering density of molecule, with units cm-2. Used
+                                for molecular weight or concentration calculation.
+                                Default is 1.22E11 cm-2, typical X-ray scattering density of proteins.
+          --deltaRho=DELTARHO   Scattering density difference with units cm-2. Used
+                                for molecular weight or concentration calculation.
+                                Default is to calculate difference from
+                                molecule and solvent scattering densities.
+                                 
+      The default behavior is to assume the data files are in PDH format
+      If the option -r (or --raw) is used, the program assumes the files 
+      are in a "raw" format and only looks for rows containing exactly three fields.
+      For data without errors, use the -r and -noErr options
+    
+      The plot can be saved as an image file by specifying 
+      a file name with the -p or -pfile name
+      No file is saved if no name is specified.
+      The format is is specified by the file name suffix.
+      Supported formats are: emf, eps, pdf, png, ps, raw, rgba, svg, svgz.
+      Default format is png. A png file can also be saved from the plot window.
+    
+      The -d or --dexp option causes the script to do a double-exponential fit to the data,
+      in addition to the standard Guinier fit.
+    
+      The --noErr option plots data without error bars, 
+      and does not weight data for fitting.
+      
+      If the --conc option is used to specify a molecule concentration, the program will
+      calculate a molecular weight from the extrapolated intensity at q=0.
+      Conversely, if the --mw option is used to specify a molecular weight, the program
+      will calculate the concentration.  If both concentration and mw are specified, 
+      the program protests!
+      These calculations assume that the scattering data are calibrated to absolute
+      intensities, with units cm-1
+      The program uses default values for partial specific volume of the molecule (0.74 mg/mL)
+      and the scattering densities of the molecule and the solvent.  The default
+      scattering densities are those for X-rays scattering from an average protein and water.
+      Other values can be set with the --rhoSolv, --rhoMol or --deltaRho, which accepts
+      a value for the scattering density difference.
+      
+    
+      Executing the program with the incorrect number of arguments prints a short message.
+    
+  """
+
+
+def main():
+
+    ##### Parse options and arguments   ##########
+    parser = OptionParser()
+    parser.add_option("-i", "--info", action="store_true", dest="showInfo", default=False,
+                    help ="Show more help information.")
+    parser.add_option("-r", "--raw", action = "store_true", dest="rawFile", default = False, 
+                   help="Raw input file. Default is pdh format")
+    parser.add_option("-s", "--si", action = "store_true", dest="stdin", default = False, 
+                       help="Read data from system standard input")  
+    parser.add_option("-p", "--pfile", action = "store", type="string", dest="imgFileName", default = None,
+                   help="Image file name. Suffix specifies format. Default is None")                                                 
+    parser.add_option("-d", "--dexp", action = "store_true", dest="dExpFit", default = False, 
+                   help="Perform double-exponential fit in addition to Guinier fit")
+    parser.add_option("--noErr", action = "store_true", dest="noErr", default = False, 
+                   help="no I error data.")
+                       
+    parser.add_option("--conc", action = "store", dest="conc", type= float, default = 0.0, 
+                   help="Particle concentration, mg/mL.  If provided, program calculates molecular weight.")
+                   
+    parser.add_option("--mw", action = "store", dest="mw", type= float, default = 0.0, 
+                   help="Particle relative molecular mass.  If provided, program calculates concentation.")
+                  
+    
+    parser.add_option("--vbar", action = "store", dest="vbar", type= float, default = 0.74, 
+                   help="Partial specific volume, cm^3/g. \n" +
+                   "Used for molecular weight or concentration calculation. Default = 0.74.")
+            
+    parser.add_option("--rhoSolv", action = "store", dest="rhoSolv", type= float, 
+                    default = 9.4E10, help="Scattering density of solvent, with units cm-2. " +
+                    "Used for molecular weight or concentration calculation." + 
+                    "Default is 9.4E10 cm-2, X-ray scattering density of water.")
+
+    parser.add_option("--rhoMol", action = "store", dest="rhoMol", type= float, 
+                    default = 1.22E11, help="Scattering density of molecule, with units cm-2. " +
+                    "Used for molecular weight or concentration calculation." + 
+                    "Default is 1.22E11 cm-2, average X-ray scattering density of proteins.")
+
+    parser.add_option("--deltaRho", action = "store", dest="deltaRho", type= float, 
+                    default = None, help="Scattering density difference with units cm-2. " +
+                    "Used for molecular weight or concentration calculation." + 
+                    "Default is to calculate difference from molecule and solvent scattering densities.")
+    
+    (options, args) = parser.parse_args()
+    
+    if options.showInfo:
+        sys.exit(info)
+
+        
+    ######## Check that both concentration and molecular weight haven't been specified  #######
+    message = '\nEither the particle concentration *or* the relative molecular mass \n' \
+                + 'can be specified, and I will calculate the other parameter. \n' \
+                + 'I don\'t know what to do if both are specified.'
+
+
+    if options.conc > 0.0 and options.mw > 0.0:
+        sys.exit(message)
+        
+    message = '\nsaxsGuinier: A python script to make Guinier plot and fit data. \n' \
+                + 'Requires three input arguments: qMin, qMax and file name ' \
+                + '(or two input arguments with standard input (--si) option.) \n' \
+                + 'For help, type > saxsGuinier -i'
+   
+    if options.stdin:
+        if len(args) == 2:
+            dataFileName = None
+        else:
+            sys.exit(message)
+    else:
+        if len(args) == 3:        
+             dataFileName = args[2]
+        else:
+            sys.exit(message) 
+            
+            
+    windowTitle = 'SAXS Guinier Plot'
+    if dataFileName != None:
+        windowTitle += ': ' + dataFileName
+    
+
+    qMin = float(args[0])
+    qMax = float(args[1])
+
+        
+    if options.rawFile:
+        if options.noErr:
+            data = sx.readQI(dataFileName)
+        else:
+            data = sx.readQIE(dataFileName)
+        data = np.array(data)
+    else:
+        header, data = sx.readPdh(dataFileName)
+        if options.noErr:
+            data = np.array([data[0],data[1]])
+        else:
+            data = np.array(data)
+    
+    ###### Select data for fitting   ####        
+    selq=[]
+    seli=[]
+    selerr=[]
+    for j,q in enumerate(data[0]):
+        if qMin<=q<qMax:
+            selq.append(q)
+            seli.append(data[1][j])
+            if not(options.noErr):
+                selerr.append(data[2][j])
+    selq=np.array(selq)
+    seli=np.array(seli)
+    if not(options.noErr):
+        selerr=np.array(selerr)
+    else:
+        selerr = None
+    
+    ###### Initial estimates
+    Rg0 = np.sqrt(3.0*np.log(seli[-1]/seli[0])/(selq[0]**2.0 - selq[-1]**2.0))
+    k0 = seli[0]*np.exp(-Rg0**2*selq[0]**2.0/3.0)
+    
+    
+    ###### Fit to single exponential  #######
+    try:
+        fit1param,fit1cov = curve_fit(guinierFunc,selq,seli,p0=[Rg0,k0],sigma=selerr)
+    except ValueError:
+        message = """The Guinier fit failed.  Please try another range of q-values."""
+        sys.exit(message)
+
+    
+    (Rg, k) =  correlated_values(fit1param,fit1cov)
+    text = '\n Guinier fit: \n\t$R_g$ = %4.1f $\pm$ %4.2f \t$I(0)$ = %4.2f $\pm$ %5.3f  ' \
+            % (abs(Rg.nominal_value), Rg.std_dev(), k.nominal_value, k.std_dev())
+
+    ####### Calculate data for fit curve ####### 
+    fit1i = guinierFunc(selq, fit1param[0],fit1param[1])
+    fit1Data = [selq,fit1i]
+
+    dataList = [data,fit1Data]
+
+    ####### Legend and text for plot  #######   
+    legendList = [dataFileName,'Guinier fit']
+    qRgMin = abs(fit1param[0]*qMin)
+    qRgMax = abs(fit1param[0]*qMax)
+
+    text += '\n\t%4.3f $< q >$ %4.3f  ' % (qMin,qMax)
+    text += '\t%4.1f $< q\cdot R_g  >$ %4.1f  ' % (qRgMin,qRgMax)
+
+
+    ######  Fit to double exponential if -d (--dexp) option is selected
+    if options.dExpFit:
+        ## initial estimates based on single-exponential fit
+        p0 = [fit1param[0],fit1param[0],fit1param[1]/2.0, fit1param[1]/2.0]
+        
+        ##### Fit data
+        try:
+            fit2param,fit2cov = curve_fit(guinier2Func,selq,seli,p0=p0,sigma=selerr)
+        except ValueError:
+            message = """The double-exponential fit failed.  Please try another range of q-values."""
+            sys.exit(message)
+        
+        (Rg1,Rg2,k1,k2) =  correlated_values(fit2param,fit2cov)
+        
+        ###### calculate data for fit curve
+        fit2i = guinier2Func(selq, fit2param[0],fit2param[1],fit2param[2],fit2param[3])
+        fit2Data = [selq,fit2i]
+
+        dataList.append(fit2Data)
+        
+        ####### Append to legend and text
+        legendList.append('Double-exponential fit  ')
+        text += '\n\nDouble exponential Fit:'
+        text += '\n\t$R_{g,1}$ = %4.1f $\pm$ %4.2f \t$I_1(0)$ = %4.2f $\pm$ %4.2f  ' \
+                    % (abs(Rg1.nominal_value), Rg1.std_dev(), k1.nominal_value, k1.std_dev())
+        
+        text += '\n\t$R_{g,2}$ = %4.1f $\pm$ %4.2f \t$I_2(0)$ = %4.2f $\pm$ %4.2f  ' \
+                    % (abs(Rg2.nominal_value), Rg2.std_dev(), k2.nominal_value, k2.std_dev())
+
+
+
+    ########## Molecular Weight Calculation, if concentration is provided
+    
+    if options.conc > 0.0:
+        i0 = k.nominal_value
+            
+        if options.deltaRho:
+            deltaRho = options.deltaRho
+        else:
+            deltaRho = options.rhoMol - options.rhoSolv
+        mw = sx.mw(i0,options.conc, options.vbar, deltaRho)
+        mwString =  '%6.0f' % mw
+        mwString = sx.splitThousands(mwString,',',dSep='.')
+        text += '\n\n Molecular weight = ' + mwString  + ' g/mol '
+        text += '\n\n MW assumptions: Concentration = %4.1f mg/mL ' % options.conc
+        
+        text += '\n Partial specific volume = %4.3f cm$^3$/g ' % options.vbar
+        if options.deltaRho:
+            text += '\n Scattering density difference =  %8.5G cm$^{-2}$ ' % deltaRho
+        else:    
+            text += '\n Solvent scattering density = %8.5G cm$^{-2}$  ' % options.rhoSolv
+            text += '\n Molecule scattering density = %8.5G cm$^{-2}$  '  % options.rhoMol
+  
+    ########## Concentration calculation, if molecular weight is provided
+    
+    if options.mw > 0.0:
+        i0 = k.nominal_value
+        if options.deltaRho:
+            deltaRho = options.deltaRho
+        else:
+            deltaRho = options.rhoMol - options.rhoSolv
+        conc = sx.conc(i0,options.mw, options.vbar, deltaRho)
+        concString =  '%4.1f' % conc
+        mwString =  '%6.0f' % options.mw
+        mwString = sx.splitThousands(mwString,',',dSep='.')
+        text += '\n\n Concentration = ' + concString  + ' mg/mL '
+        text += '\n\n Concentration assumptions: MW = ' + mwString + ' g/mol '
+        
+        text += '\n Partial specific volume = %4.3f cm$^3$/g ' % options.vbar
+        if options.deltaRho:
+            text += '\n Scattering density difference =  %8.5G cm$^{-2}$ ' % deltaRho
+        else:    
+            text += '\n Solvent scattering density = %8.5G cm$^{-2}$  ' % options.rhoSolv
+            text += '\n Molecule scattering density = %8.5G cm$^{-2}$  '  % options.rhoMol
+  
+
+ 
+    ########## Plot Parameters  ###############
+    qPlotMin = 0
+    qPlotMax = 1.2*qMax
+    iPlotMax = 1.2*guinierFunc(fit1Data[0][0],fit1param[0],fit1param[1])
+    iPlotMin = 0.8*guinierFunc(fit1Data[0][-1],fit1param[0],fit1param[1])
+    
+    plotParam = ['guinier',[qPlotMin,qPlotMax],[iPlotMin,iPlotMax]]
+    colorList = ['k','r','b']
+    
+    if options.rawFile:
+        qUnits=0
+        absI=False
+    else:
+        qUnits = header[4][4]
+        if header[2][2] == 1:
+            absI = True
+        else:
+            absI = False
+    
+
+
+    ############### Make Plot #####################
+    plotHeight = 6.5
+    botMarg = 0.25
+    if options.dExpFit:
+        plotHeight += 0.5
+        botMarg += 0.1
+    if options.mw >0 or options.conc>0:
+        plotHeight += 1
+        botMarg += 0.15
+    
+    fig = plt.figure(figsize=(7,plotHeight))
+    plotPos = 111
+    ax1 = sx.saxsPlot(fig,plotPos, plotParam, dataList, 
+            legends=legendList,colors = colorList, qUnits=qUnits,absI=absI)
+    
+    ax1.text(0,-0.15, text,bbox=dict(facecolor='white', alpha=1),
+            horizontalalignment='left',
+            verticalalignment='top', size='medium',
+            transform = ax1.transAxes)
+
+    fig.subplots_adjust(bottom=botMarg,top=0.95) # This adds extra space at the bottom for text box
+    fig.canvas.set_window_title(windowTitle) 
+
+
+    if options.imgFileName != None:
+        fig.savefig(options.imgFileName)
+
+    plt.show()
+
+def guinierFunc(q,Rg,k):
+    i = k*np.exp(-q**2.0*Rg**2.0/3.0)
+    return i
+    
+def guinier2Func(q,Rg1,Rg2,k1,k2):
+    i = k1*np.exp(-q**2.0*Rg1**2.0/3.0)+k2*np.exp(-q**2.0*Rg2**2.0/3.0)    
+    return i
+    
+
+    
+if __name__=="__main__":
+    main()
+

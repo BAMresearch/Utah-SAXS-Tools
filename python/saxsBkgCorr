@@ -1,0 +1,221 @@
+#! /Library/Frameworks/Python.framework/Versions/Current/bin/python
+
+#   A Python script to correct SAXS profile for constant background 
+
+#  (c) 2009-2011 by David P. Goldenberg
+#  Please send feature requests, bug reports, or feedback to this address:
+#           Department of Biology
+#           University of Utah
+#           257 South 1400 East
+#           Salt Lake City, UT
+#     
+#           goldenberg@biology.utah.edu
+#     
+#  This software is distributed under the conditions  of the BSD license.
+#  Please see the documentation for further details.
+
+import sys
+
+from optparse import OptionParser
+
+import numpy as np 
+from scipy.optimize import curve_fit
+import matplotlib.pyplot as plt
+import saxs as sx
+
+info = """ saxsBkgCorr
+      A Python script to correct SAXS profile for constant background 
+      In default mode, the program requires three inputs, 
+      The min and max Q values for calculating average background
+      and the name of the input data file.
+      If the -c (--const) option is used (with the specified offset value),
+      only the file name is expected as an argument.
+      Plots of the original and subtracted profiles are automatically generated
+      using the matplotlib python library.
+    
+      Options:    
+          -h, --help            show this help message and exit
+          -i, --info            Show more help information.
+          -r, --raw             Raw input file. Default is pdh format
+          -s, --si              Read data from system standard input and write to
+                                standard output
+          --so                  Direct output to system standard output
+          -p POWER, --pow=POWER
+                                Negative power for fitting function. Default is 0
+          -c CONSTOFF, --const=CONSTOFF
+                                Add a constant offset rather than fitting to data.
+                                Default is to use fitting
+          -t PLOTTYPE, --plot=PLOTTYPE
+                                Plot type. Options are none, linear, log, loglog,
+                                guinier, kratky
+
+      The default behavior is to assume the data files are in PDH format and to 
+      calculate the background offset as the average of points in the q-range
+      defined by the first two arguments. (see below)
+      If the file name is preceded by the argument -r, the program assumes the files 
+      are in a "raw" format and only looks for rows containing exactly three fields,
+      the last of which must be a digit.
+      If power is 0 (default), the program calculates a weighted average of the 
+      I values in the selected region and subtracts this from the input data.
+      If power is not 0, the data in the selected region is fit to the function 
+      I(q) = a + b**power, and fit value of a is subtracted from the input data
+      power = -4 corresponds to "Porod correction" for unsmeared data
+      power = -3 corresponds to "Porod correction" for smeared data
+
+        
+      The errors in the subtracted data are assumed to be equal to the original errors
+        
+  """
+
+def main():
+
+    ##### Parse options and arguments   ##########
+    parser = OptionParser()
+    parser.add_option("-i", "--info", action="store_true", dest="showInfo", default=False,
+                        help ="Show more help information.")  
+    parser.add_option("-r", "--raw", action = "store_true", dest="rawFile", default = False, 
+                       help="Raw input file. Default is pdh format")
+    parser.add_option("-s", "--si", action = "store_true", dest="stdin", default = False, 
+                help="Read data from system standard input and write to standard output")                     
+    parser.add_option("--so", action = "store_true", dest="stdo", default = False, 
+                       help="Direct output to system standard output")                       
+    parser.add_option("-p", "--pow", action = "store", type = "float", 
+                        dest="power", default = 0.0,
+                        help="Negative power for fitting function. Default is 0")                       
+    parser.add_option("-c", "--const", action = "store", type="float", 
+                        dest = "constOff", default = None, 
+                        help="Add a constant offset rather than fitting to data.  Default is to use fitting")
+    parser.add_option("-t", "--plot", action = "store", type = "string", 
+                       dest="plotType", default = "linear", 
+                       help="Plot type. Options are none, linear, log, loglog, guinier, kratky")
+ 
+    (options, args) = parser.parse_args()
+
+    if options.showInfo:
+        sys.exit(info)
+        
+    message = '\n saxsBkgCorr: A python script to correct for constant ' \
+                + 'background in SAXS profiles. \n' \
+                + ' For information, type > saxsBkgCorr.py -i'       
+    
+    if options.constOff:
+        argNo = 1
+    else:
+        argNo = 3
+        qMin = float(args[0])
+        qMax = float(args[1])
+    
+    fileNames = sx.fileNamer(options,args,argNo, 'bcor')
+        
+        
+    if fileNames == None:
+        sys.exit(message)
+    else:
+        inFileName = fileNames[1]
+        outFileName = fileNames[2]
+        
+    if inFileName == None:
+        windowTitle = 'SAXS Background Correction'
+    else:
+        windowTitle = 'SAXS Background Correction: ' + inFileName
+
+
+    
+
+    
+    global pow  # make this available to power function
+    pow = options.power
+
+    
+    ###### Read input data
+    if options.rawFile:
+        data = sx.readQIE(inFileName)
+    else:
+        header, data = sx.readPdh(inFileName)
+    
+    data =np.array(data)
+    
+    ##### Check if constant offset option is specified
+    if options.constOff:
+        backGd = options.constOff
+        fitData=[[],[]]
+    else:
+    
+        ###### Select data for fitting   ####        
+        selq=[]
+        seli=[]
+        selerr=[]
+        for j,q in enumerate(data[0]):
+            if qMin<=q<qMax:
+                selq.append(q)
+                seli.append(data[1][j])
+                selerr.append(data[2][j])
+        selq=np.array(selq)
+        seli=np.array(seli)
+        selerr=np.array(selerr)
+        
+        
+        ###### If power = 0, calculate background as weight average of selected data
+        if pow == 0.0:
+            weights = 1.0/selerr
+            wtAvg = sum(seli*weights)/sum(weights)
+            fiti = np.ones(len(selq))*wtAvg
+            backGd = wtAvg
+            
+        ###### If power is not 0, fit selected data to power function and calculate
+        ###### background as extrapolated constant.
+        else:    
+            popt,pcov = curve_fit(powerFunc,selq,seli,sigma=selerr)
+            fiti = powerFunc(selq, popt[0],popt[1])
+            backGd = popt[0]
+        fitData = [selq,fiti]
+
+    ###### subtract background 
+    
+    corrData = np.copy(data)
+    corrData[1] = corrData[1]-backGd
+    
+    
+    ####### plot data
+    if options.plotType != "none":    
+        plotParam = [options.plotType,0,0]
+        colorList = ['r','b','k']
+        
+        if options.rawFile:
+            qUnits=0
+            absI=False
+        else:
+            qUnits = header[4][4]
+            if header[2][2] == 1:
+                absI = True
+            else:
+                absI = False
+        
+        fig = plt.figure()
+        plotPos = 211
+        legends = ['Uncorrected', 'Fit, power = ' + str(options.power)]
+        ax1 = sx.saxsPlot(fig,plotPos, plotParam, [data,fitData], 
+                legends=legends,colors = colorList,qUnits=qUnits,absI=absI)
+        ax1.axhline(y=0,xmin=0,xmax=1,c='k',ls='--')
+        plotPos = 212        
+        ax2 = sx.saxsPlot(fig,plotPos, plotParam, [corrData], 
+                legends=['Corrected'],colors = colorList,qUnits=qUnits,absI=absI)
+        ax2.axhline(y=0,xmin=0,xmax=1,c='k',ls='--')
+        fig.subplots_adjust(bottom=0.1, hspace=0.25)
+        fig.canvas.set_window_title(windowTitle) 
+        plt.show()
+
+    
+    ##### write corrected data to output file
+    if options.rawFile:
+        sx.writeQIE(outFileName,corrData)
+    else:
+        sx.writePdh(outFileName, header,corrData)
+        
+def powerFunc(x,a,b):
+    global pow
+    return a+b*x**pow
+
+    
+if __name__=="__main__":
+    main()

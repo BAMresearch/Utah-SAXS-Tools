@@ -1,0 +1,172 @@
+#! /Library/Frameworks/Python.framework/Versions/Current/bin/python
+
+#   A Python script to subtract dark current data from SAXS profiles
+
+#  (c) 2009-2011 by David P. Goldenberg
+#  Please send feature requests, bug reports, or feedback to this address:
+#           Department of Biology
+#           University of Utah
+#           257 South 1400 East
+#           Salt Lake City, UT
+#     
+#           goldenberg@biology.utah.edu
+#     
+#  This software is distributed under the conditions of the BSD license.
+#  Please see the documentation for further details.
+
+import sys
+
+from optparse import OptionParser
+
+import numpy as np 
+import matplotlib.pyplot as plt
+import saxs as sx
+
+info = """ saxsDarkCurrSub
+      A Python script to subtract dark current data from SAXS profiles
+      The program requires two inputs, 
+      the name of the reference file and the name of the input data file
+      both files must have the same number of points and matching q-values
+      The corrected profile is directed to standard output
+      Plots of the original and subtracted profiles are automatically generated
+      using the matplotlib python library.
+    
+	Options:
+	  -h, --help            show this help message and exit
+	  -i, --info            Show more help information.
+	  -r, --raw             Raw input file. Default is pdh format
+	  -s, --si              Read data from system standard input and write to
+							standard output
+	  --so                  Direct output to system standard output
+	  -t PLOTTYPE, --plot=PLOTTYPE
+							Plot type. Options are none, linear, log, loglog,
+							guinier, kratky
+    
+      The default behavior is to assume the data files are in PDH format (see below)
+      If the file name is preceded by the argument -r, the program assumes the files 
+      are in a "raw" format and only looks for rows containing exactly three fields,
+      the last of which must be a digit.
+    
+      Executing the program with the incorrect number of arguments prints a short message.
+    
+      The errors in the subtracted data are assumed to be equal to the original errors
+    
+  """
+
+
+
+def main():
+
+    ##### Parse options and arguments   ##########
+    parser = OptionParser()
+    parser.add_option("-i", "--info", action="store_true", dest="showInfo", default=False,
+                        help ="Show more help information.")
+    
+    parser.add_option("-r", "--raw", action = "store_true", dest="rawFile", default = False, 
+                       help="Raw input file. Default is pdh format")
+    parser.add_option("-s", "--si", action = "store_true", dest="stdin", default = False, 
+                help="Read data from system standard input and write to standard output")  
+
+    parser.add_option("--so", action = "store_true", dest="stdo", default = False, 
+                       help="Direct output to system standard output")
+                       
+
+    parser.add_option("-t", "--plot", action = "store", type = "string", 
+                       dest="plotType", default = "linear", 
+                       help="Plot type. Options are none, linear, log, loglog, guinier, kratky")
+
+ 
+    (options, args) = parser.parse_args()
+
+
+    if options.showInfo:
+        sys.exit(info)
+        
+    message = '\n saxsDarkCurrSub.py: A python script to subtract dark current ' \
+                + 'background in SAXS profiles.' \
+                + '\n Requires two input arguments:  '\
+                + 'dark current file name and data file name. ' \
+                + '\n For help, type > saxsBkgCorr.py -i'
+    
+    fileNames = sx.fileNamer(options,args,2, 'dcs')
+    if fileNames == None:
+        sys.exit(message)
+    else:
+        dataFileName = fileNames[1]
+        outFileName = fileNames[2]
+
+    dcFileName = args[0]
+
+    if dataFileName == None:
+        windowTitle = 'SAXS Dark Current Subtraction'
+    else:
+        windowTitle = 'SAXS Dark Current Subtraction: ' \
+                        + dataFileName + ' - ' + dcFileName
+    
+    
+    ###### Read input data
+    if options.rawFile:
+        data = sx.readQIE(dataFileName)
+        dcData = sx.readQIE(dcFileName)
+    else:
+        header, data = sx.readPdh(dataFileName)
+        dcHeader, dcData = sx.readPdh(dcFileName)
+   
+    data =np.array(data)
+    dcData = np.array(dcData)  
+
+    if checkData(data,dcData):
+        corrData = np.copy(data)
+        corrData[1] = data[1]-dcData[1]
+        
+        ####### plot data
+        if options.plotType != "none":
+        
+            if options.rawFile:
+                qUnits=0
+            else:
+                qUnits = header[4][4]
+
+            plotParam = [options.plotType,0,0]
+            colorList = ['r','b','k']
+            
+            
+            fig = plt.figure()
+            plotPos = 211
+            ax1 = sx.saxsPlot(fig,plotPos, plotParam, [data,dcData], 
+                    legends=['Uncorrected','Dark Current'],colors = colorList, qUnits=qUnits)
+            plotPos = 212
+            ax2 = sx.saxsPlot(fig,plotPos, plotParam, [corrData], 
+                    legends=['Corrected'],colors = colorList, qUnits=qUnits)
+            
+            fig.subplots_adjust(bottom=0.1, hspace=0.25)
+            fig.canvas.set_window_title(windowTitle) 
+
+            plt.show()
+    
+        ##### print corrected data to output file
+        if options.rawFile:
+            sx.writeQIE(outFileName,corrData)
+        else:
+            sx.writePdh(outFileName, header,corrData)        
+    
+    
+    else:
+        sys.exit('The q-values in the data files do not match')
+
+    
+        
+def checkData(data,dcData):
+    if len(data[0]) != len(dcData[0]):
+        return False
+    else:
+        ok = True
+        for i,q in enumerate(data[0]):
+            if abs(q-dcData[0][i]) > 0.001:
+            #    print q, q-dcData[0][i]
+                ok = False
+        return ok
+        
+                
+if __name__=="__main__":
+    main()

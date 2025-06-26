@@ -1,0 +1,115 @@
+#! /Library/Frameworks/Python.framework/Versions/Current/bin/python
+
+# A Python utility script to read pdh files and return header information
+
+#  (c) 2009-2011 by David P. Goldenberg
+#  Please send feature requests, bug reports, or feedback to this address:
+#           Department of Biology
+#           University of Utah
+#           257 South 1400 East
+#           Salt Lake City, UT
+#     
+#           goldenberg@biology.utah.edu
+#     
+#  This software is distributed under the conditions of the BSD license.
+#  Please see the documentation for further details.
+
+
+import sys
+import saxs as sx
+from optparse import OptionParser
+
+def showInfo():
+    message = """ readPdhHead.py
+    A Python utility script to read pdh files and return header information
+    as specified in standard pdh specification plus special fields for 
+    Anton Paar SAXSess and Utah SAXS tools
+    Requies saxs.py module
+    
+    Requires one argument, name of the pdh file
+    writes to standard output
+    Options:
+      -h, --help  show a help message and exit
+      -i, --info  Show additional information and exit
+    """
+    sys.exit(message)
+    
+
+def main():
+    parser = OptionParser()
+    
+    parser.add_option("-i", "--info", action = "store_true", 
+                   dest="showInfo", default = False, 
+                   help="Show additional information and exit")
+
+                   
+    (options, args) = parser.parse_args()
+    if (options.showInfo or len(args)==0):
+        sys.exit(info)
+
+    fileName = args[0]
+    pdhHeader, expData = sx.readPdh(fileName)
+    
+    if pdhHeader[2][1]==0:
+        beamProfType = "No beam length profile"
+    elif pdhHeader[2][1] ==1:
+        beamProfType = "Sigmoidal"
+    elif pdhHeader[2][1] ==2:
+        beamProfType = "Trapezoidal"
+    else:
+        beamProfType = "Not recognized"
+        
+    if pdhHeader[2][2] == 1:
+    	absI = 'Yes (cm-1)'
+    else:
+    	absI = 'No'
+    
+    if pdhHeader[4][4] == 1:
+        qScale = "A-1"
+    elif pdhHeader[4][4] ==10:
+        qScale = "nm-1"
+    else:
+        qScale = "Not recognized (" +str(pdhHeader[4][4]) + ")"
+    
+    print ""
+    print "File name: " + fileName
+  
+    print ""
+    print "PCG-specified parameters "
+    print "\t Description: " + pdhHeader[0]
+    print "\t Key words: ",
+    for word in pdhHeader[1]:
+        print word,
+    print ""
+   
+    print "\t No. of data pts: " + str(pdhHeader[2][0])
+    print "\t Normalization factor: " + str(pdhHeader[3][3])
+    
+    print ""
+    print "SAXSess parameters"
+    print "\t Sample to detector distance: " + str(pdhHeader[3][1]) + " mm"
+    print "\t Wavelength: " + str(pdhHeader[3][4])
+    
+    print ""
+    print "Utah SAXS Tools parameters"
+    print "\t Beam length profile type: " + beamProfType
+    if pdhHeader[2][1] == 1:
+        print "\t Sigmoidal beam length parameter a: " + str(pdhHeader[4][0])
+        print "\t Sigmoidal beam length parameter b: " + str(pdhHeader[4][1])
+    elif pdhHeader[2][1] == 2:
+        print "\t Trapezoidal beam length parameter a (long side): " + str(pdhHeader[4][0])
+        print "\t Trapezoidal beam length parameter b (short side): " + str(pdhHeader[4][1])
+    else:
+        print "\t Beam length parameter a: " + str(pdhHeader[4][0])
+        print "\t Beam length parameter b: " + str(pdhHeader[4][1])
+   
+    print "\t Beam half-width: " + str(pdhHeader[4][2])
+    print "\t Detector slit-width: " + str(pdhHeader[4][3])
+    print "\t Q-scale: " + qScale
+    
+    print "\t Absolute scattering intensity scale: " + absI
+    
+    print ""
+
+if __name__=="__main__":
+    main()

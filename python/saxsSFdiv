@@ -1,0 +1,193 @@
+#! /Library/Frameworks/Python.framework/Versions/Current/bin/python
+
+#   A Python script to divide a SAXS profile by the predicted structure factor
+#   for a solution of hard spheres.
+
+#  (c) 2009-2011 by David P. Goldenberg
+#  Please send feature requests, bug reports, or feedback to this address:
+#           Department of Biology
+#           University of Utah
+#           257 South 1400 East
+#           Salt Lake City, UT
+#     
+#           goldenberg@biology.utah.edu
+#     
+#  This software is distributed under the conditions of the BSD license.
+#  Please see the documentation for further details.
+
+import sys
+from optparse import OptionParser
+import numpy as np 
+import matplotlib.pyplot as plt
+from uncertainties import ufloat
+import saxs as sx
+from scipy import interpolate
+
+info = """ saxsSFdiv
+      A Python script to divide a SAXS profile by the predicted structure factor
+      for a solution of hard spheres.
+
+      The program requires three input arguments:
+      phi: the volume fraction occupied by hard spheres
+      r: the radius of the hard spheres
+      the name of the scattering data file.
+      Options:
+      -h, --help            show this help message and exit
+      -i, --info            Show more help information.
+      -r, --raw             Raw input file. Default is pdh format
+      -s, --si              Read data from system standard input and write to
+                            standard output
+      --so                  Direct output to system standard output
+      -t PLOTTYPE, --plot=PLOTTYPE
+                            Plot type. Options are none, linear, log, loglog,
+                            guinier, kratky. Default is linear
+    
+      The output is directed to a new file, 
+      or to standard output if the -s (--stdo) option is chosen.
+      The default behavior is to assume the data file is in PDH format.
+      If the file names are preceded by the argument -r, the program assumes the files 
+      are in a "raw" format and only looks for rows containing exactly three fields.
+            
+  """
+
+def main():
+    ##### Parse options and arguments   ##########
+    parser = OptionParser()
+    
+    parser.add_option("-i", "--info", action="store_true", dest="showInfo", default=False,
+                        help ="Show more help information.")
+    parser.add_option("-r", "--raw", action = "store_true", dest="rawFile", default = False, 
+                       help="Raw input file. Default is pdh format")
+    parser.add_option("-s", "--si", action = "store_true", dest="stdin", default = False, 
+                help="Read data from system standard input and write to standard output")  
+    parser.add_option("--so", action = "store_true", dest="stdo", default = False, 
+                       help="Direct output to system standard output")                       
+    parser.add_option("-t", "--plot", action = "store", type = "string", 
+                       dest="plotType", default = "linear", 
+                       help="Plot type. Options are none, linear, log, "\
+                            + "loglog, guinier, kratky. Default is linear")    
+   
+    (options, args) = parser.parse_args()
+
+    
+    if options.showInfo:
+        sys.exit(info)
+        
+    message = '\n saxsSFdiv A Python script to divide a SAXS profile by the \n' \
+                + 'predicted structure factor for a solution of hard spheres.\n'\
+                +  'The program requires three input arguments:\n' \
+                +  '   phi: the volume fraction occupied by hard spheres\n'\
+                +  '   r: the radius of the hard spheres \n'\
+                +  '   the name of the scattering data file.' \
+
+    fileNames = sx.fileNamer(options,args,3, 'sfdiv')
+    if fileNames == None:
+        sys.exit(message)
+    else:
+        inFileName = fileNames[1]
+        outFileName = fileNames[2]
+    
+    phi = float(args[0])
+    r = float(args[1])
+    
+    ###### Window Title
+    if inFileName == None:
+        windowTitle = 'SAXS Data'
+        inputLegend = ['Input data']
+    else:   
+        inputLegend = [inFileName]
+        windowTitle = 'SAXS Data: ' + inFileName + ' Divided by Structure Factor'
+    
+    ###### Read input data
+        
+    if options.rawFile:
+        data = sx.readQIE(inFileName)
+    else:
+        header, inData = sx.readPdh(inFileName)
+        inData =np.array(inData)
+        
+
+    ##### This is where any data manipulations would take place ####
+    
+    outData=[[],[],[]]
+    strFact = []
+    for i, q in enumerate(inData[0]):
+        sf = sx.hsStructFact(q,phi,r)
+        strFact.append(sf)  
+        outData[0].append(q)    
+        outData[1].append(inData[1][i]/sf)
+        outData[2].append(inData[2][i]/sf)
+
+
+           
+    #### Plots   
+    if options.plotType != 'none':
+        plotParam = [options.plotType,0,0]
+        if options.rawFile:
+            qUnits=0
+            absI = False
+        else:
+            qUnits = header[4][4]
+            if header[2][2] == 1:
+                absI = True
+            else:
+                absI = False
+        
+        outLegend = [inFileName + ' $\div$ structure factor']
+                
+        fig = plt.figure()
+        plotPos = 211
+        ax1 = sx.saxsPlot(fig,plotPos, plotParam, [inData],
+                            legends=inputLegend, qUnits=qUnits, absI=absI)
+        ax1leg=ax1.legend(loc='upper left',bbox_to_anchor=(0,1.0))
+        for t in ax1leg.get_texts():
+            t.set_fontsize('small')    # the legend text fontsize
+
+        
+        ax2 = ax1.twinx() 
+        
+        strFactLegend = "Hard sphere structure factor \n"
+        strFactLegend += '$\phi = $ %4.2f \n' %(phi)
+        strFactLegend += '$r = $ %4.2f ' %(r)
+        
+        ax2.plot(outData[0],strFact,'r',label=strFactLegend)   
+        
+        ax2leg=ax2.legend(loc= 'upper right', bbox_to_anchor=(1,1))
+        ax2leg.get_texts()
+        for t in ax2leg.get_texts():
+            t.set_fontsize('small')    # the legend text fontsize
+                
+        ax2.set_ylabel('Structure Factor')
+        ax2.axis(ymin=0,ymax=2)
+                           
+        plotPos=212
+        ax3 = sx.saxsPlot(fig,plotPos, plotParam, [outData],
+                            legends=outLegend, qUnits=qUnits, absI=absI)
+        fig.subplots_adjust(bottom=0.1, hspace=0.25) 
+        fig.canvas.set_window_title(windowTitle) 
+        plt.show()
+        
+
+    ##### write output data to output file
+    if options.rawFile:
+        sx.writeQIE(outFileName,outData)
+    else:
+    ####### Include any modifications to the header here
+        header[2][0] = len(outData[0])
+        sx.writePdh(outFileName, header,outData)
+
+    
+def readDivData(divFileName):
+    divFile = open(divFileName,'r')
+    q=[]
+    I=[]    
+    for line in divFile.readlines()[1:]: # disregard first line
+        line = line[:-1]    # Chop newline character
+        fields = line.split()     # Split line into fields
+        q.append(float(fields[0]))
+        I.append(float(fields[1]))
+    return [np.array(q), np.array(I)]     
+
+if __name__=="__main__":
+    main()
+

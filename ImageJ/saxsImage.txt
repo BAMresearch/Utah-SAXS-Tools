@@ -1,0 +1,869 @@
+// ImageJ macros for integrating image data from SAXS measurements.
+// Specifically designed for images from the Anton Paar SAXSess instrument
+// But, most of this should work for other line-collimated 
+// instruments with 2-D image detectors.
+
+// To use these macros, open the file using the Plugins > Macros > Install . . .
+// Menu of ImageJ
+// To automatically install the macros on startup, rename this file StartupMacros.txt
+// and place it in the macros folder of the ImageJ folder, replacing the 
+// default StartupMacros file.
+// To change parameter defaults, edit lines 28-38
+
+//  (c) 2009-2011 by David P. Goldenberg
+//   Please send feature requests, bug reports, or feedback to this address:
+//            Department of Biology
+//            University of Utah
+//            257 South 1400 East
+//            Salt Lake City, UT
+//      
+//            goldenberg@biology.utah.edu
+//      
+//   This software is distributed under the conditions of the BSD license.
+//   Please see the documentation for further details.
+
+
+// Default values for global parameters
+
+var	wavelength=1.542; // X-ray wavelength
+var qUnits="A-1"; // qUnits - either "A-1" or "nm-1"
+var	sdDistance=264.5; // sample-detector distance, in mm
+var imageScale=600; // pixels per inch
+var imageDataType="Square Root"; // "Linear" or "Square Root" - see pixelValue function
+var iScale=1E-4; // scaling factor for intensities
+var errMethod="Sqrt(I)"; // method for calculating errors, "Sqrt(I)","Std. Dev." or "Percent I"
+var errPerc=1.0; // value for calculating error by percent method
+var	profWidth=10; // width of profile for integration, in mm
+var beamProfType = "Sigmoid"; // beam profile type: "Sigmoid" or "Trapezoid"
+
+
+
+var mmPerPixel=25.4/imageScale;
+// arrays with image-specific paramaters
+
+var autoCenter=newArray(100);
+Array.fill(autoCenter,0);
+
+var darkCurr =newArray(100);
+Array.fill(darkCurr,0);
+
+var beamParamA = newArray(100);
+Array.fill(beamParamA,0);
+var beamParamB = newArray(100);
+Array.fill(beamParamB,0);
+var beamTopWidth = newArray(100);
+Array.fill(beamTopWidth,0);
+var beamBottomWidth = newArray(100);
+Array.fill(beamBottomWidth,0);
+var beamHalfWidth = newArray(100);
+Array.fill(beamHalfWidth,0);
+var beamPos = newArray(100);
+Array.fill(beamPos,0);
+
+
+// The individual macro names appear in the Macro submenu.  
+// Executing the menu items calls functions
+
+macro "Set Parameters..." {
+	// Dialog to set parameter values
+	setParameters();
+}
+
+macro "Measure Dark Current"{
+	measureDarkCurrent();
+}
+
+macro "Align Image to Beam" {
+	alignImage();
+}
+
+macro "Beam Profile" {
+	beamProfile();
+}
+
+macro "Auto Center Integration Rectangle"{
+	autoCenterRectangle();
+}
+
+macro "Scattering Profile"{
+	scatterProfile();
+}
+
+macro "Clear Image Parameters"{
+	clearImageParam();
+}
+
+function setParameters(){
+	// Dialog to set parameter values
+	Dialog.create("SAXS Profile Parameters");
+	
+	Dialog.addNumber("Wavelength (A):", wavelength);
+	Dialog.addChoice("Q units:",newArray("A-1","nm-1"),qUnits);
+	Dialog.addNumber("Sample-detector distance (mm):", sdDistance);
+	Dialog.addNumber("Image scale (pixel/inch):", imageScale);
+	Dialog.addChoice("Image data type:",newArray("Square Root","Linear"),imageDataType);
+	Dialog.addNumber("Intensity scale factor",iScale,5,7,"");
+	Dialog.addChoice("Error method",newArray("Sqrt(I)","Std. Dev.","Percent I"),errMethod)
+	Dialog.addNumber("Percent error",errPerc);
+	Dialog.addNumber("Integration profile width (mm):", profWidth);
+
+	Dialog.addChoice("Beam profile type",newArray("Sigmoid","Trapezoid"),beamProfType)
+	Dialog.show();
+	
+	wavelength= Dialog.getNumber();
+	qUnits = Dialog.getChoice();
+	sdDistance = Dialog.getNumber();
+	imageScale =Dialog.getNumber();
+	
+	imageDataType = Dialog.getChoice();
+	iScale = Dialog.getNumber();
+	errMethod = Dialog.getChoice();
+	errPerc = Dialog.getNumber();
+	
+
+	profWidth = Dialog.getNumber();
+	beamProfType = Dialog.getChoice();
+	
+	// scale image in mm, using scale set in dialog
+	mmPerPixel=25.4/imageScale;
+	run("Properties...", "unit=mm pixel_width="+mmPerPixel);
+	run("Properties...", "pixel_height="+mmPerPixel);
+	
+
+}
+
+function measureDarkCurrent() {
+	// measure background intensity from a selected region
+	// stores image-specific value
+	imageId = -getImageID();	
+	getSelectionBounds(x,y,w,h);
+	totalSig = 0
+	for (i=0; i< w; i++){
+		xCoor = x+i;
+		for (j=0;j<h;j++){
+			yCoor = y+j;
+			totalSig = totalSig + pixelValue(xCoor,yCoor);
+		}
+	}
+	darkCurr[imageId] = totalSig/(w*h);
+
+	
+}
+
+function alignImage() {
+	// Align image to beam using user selected rectangle containing beam image
+	// For each vertical slice along beam length, finds position of maximum
+	// Then, does least-squares fit to a line to find slope of positions of maxima
+	// Rotates image by angle corresponding to the slope
+	
+	getSelectionBounds(x,y,w,h);
+	xArray=newArray(w);
+	yMaxPosArray=newArray(w);
+	for (i=0; i< w; i++){
+		xCoor = x+i;
+		max=pixelValue(xCoor,y);
+		maxCoor=0;
+		for (j=0;j<h;j++){
+			yCoor = y+j;
+			value= pixelValue(xCoor,yCoor);
+			if (value > max) {
+				max = value;
+				maxCoor=j;
+			}
+			
+		}
+		xArray[i]=xCoor;
+		yMaxPosArray[i] = maxCoor;
+	}
+
+	Fit.doFit("Straight Line", xArray, yMaxPosArray);
+	slope = Fit.p(1);
+	rotAngle = -atan(slope)*360/(2*PI);
+
+	run("Select All");
+
+	run("Arbitrarily...", "interpolation=Bilinear angle="+rotAngle);
+	run("Select None");
+	makeRectangle(x,y,w,h);
+	
+}
+
+function autoCenterRectangle(){
+	
+	// Uses a user selection to find center of the scattering
+	// intensity of the image and sets the rectangle
+	// to the width specified by profWidth (in mm)
+	// uses a parabolic fit to the image density as 
+	// function of x-position to find center with maximum intensity
+	
+	// also sets global array element beamPos for use in defining Q=0
+	// for scattering profile.
+
+	// set image scale in mm
+	run("Properties...", "unit=mm pixel_width="+mmPerPixel);
+	run("Properties...", "pixel_height="+mmPerPixel);
+
+	imageId = -getImageID();	
+
+	getSelectionBounds(x,y,w,h);
+	xCoord=newArray(w);
+	avgI=newArray(w);
+	for (i=0; i< w; i++){
+		xCoor = x+i;
+		xCoord[i]=xCoor;
+		avgI[i]=0;
+		for (j=0;j<h;j++){
+			yCoor = y+j;
+			avgI[i]+=pixelValue(xCoor,yCoor);
+			}
+		avgI[i]=avgI[i]/w;
+	}
+
+	fit = fitParab(avgI); // fit parameters refer to index of avgI array
+	center = round(x -fit[1]/(2*fit[2])); // center defined relative to image coord
+
+	newW = round(profWidth/mmPerPixel);
+	newX = round(center-newW/2);
+
+	// Check to make sure that the new rectangle is enclosed within the 
+	// original selection.  If not, ask the user to select a larger rectangle
+	
+	if (newX < x || newX+profWidth > x+w){
+		exit("Please select a wider region.")
+	}
+	
+	makeRectangle(newX,y,newW,h);
+ 	autoCenter[imageId]=center;	
+ 	
+ 	// calculate values to plot fitted curve
+ 	fitI=newArray(w);
+ 	for (i=0;i<w;i++){
+ 		fitx=xCoord[i]-x;
+ 		fitI[i] = fit[0] + fit[1]*fitx + fit[2]*fitx*fitx;
+ 	}
+ 	
+ 	// Plot to show fit used to center the integration rectangle
+	//  	xRect=newArray(4);
+	//  	yRect=newArray(4);
+	//  	xRect[0] =newX;
+	// 		xRect[1] = newX;
+	// 		xRect[2] = newX+newW;
+	// 		xRect[3] = newX+newW;
+	// 		yRect[0] =0;
+	// 		yRect[1] = fitI[xRect[0]-x];
+	// 		yRect[2] = fitI[xRect[1]-x];
+	// 		yRect[3]=0;
+	//  	Plot.create("Profile","X","Avg Intensity",xCoord,fitI);
+	//  	Plot.setColor("red");
+	//  	Plot.add("lines",xCoord,avgI);
+	//  	Plot.setColor("blue");
+	//  	Plot.add("lines",xRect,yRect);
+	//  	Plot.setColor("black");
+	// 		Plot.show();
+
+}
+
+
+
+function scatterProfile(){
+
+	// integrates horizontal slices in the selection region to 
+	// generate scattering profile.
+	// checks to see if the region has been auto-centered
+	// If it has, the horizontal position is returned to the center
+	// changes to vertical position are left as is.
+	// In either case, width of region is set according to profWidth
+	// Generates plot of profile and calls makeDataWindow for PDH data output
+	
+	imageId = -getImageID();
+	
+	if (darkCurr[imageId]==0){
+		exit("Dark current has not been measured for this image")
+	}	
+	imageName = getTitle();
+	imageName = substring(imageName,0,lastIndexOf(imageName,"."));
+
+	getSelectionBounds(x,y,w,h);
+	if (autoCenter[imageId]==0){
+		center = x+w/2;
+		newW = profWidth/mmPerPixel;
+		newX = center-newW/2;
+	} else {	
+		newW = profWidth/mmPerPixel;
+		newX = autoCenter[imageId] - newW/2;
+	} 
+	makeRectangle(newX,y,newW,h);
+	
+	getSelectionBounds(x,y,w,h);
+	avgI=newArray(h);
+	q=newArray(h);
+	err=newArray(h);
+	
+	for (i=0; i< h; i++){
+		yCoor = y+i;
+		sumI=0;
+		sumIsq=0;
+		for (j=0;j<w;j++){
+			xCoor = x+j;
+			intensity=(pixelValue(xCoor,yCoor)-darkCurr[imageId])*iScale;
+			sumI+=intensity;
+			sumIsq+= intensity*intensity;
+			}
+		avgI[h-i-1]=sumI/w;
+		err[h-i-1]=sqrt((sumIsq - (1/w)*sumI*sumI)/(w-1));
+	}
+
+	// Error options
+	if (errMethod=="Std. Dev.") {
+		for (i=0;i<h;i++) {
+			err[i]=err[i];		
+		}
+	} else if (errMethod == "Sqrt(I)") {
+		for (i=0;i<h;i++) {
+			err[i]=sqrt(avgI[i]);		
+		}
+	} else if (errMethod == "Percent I") {
+		for (i=0;i<h;i++) {
+			err[i]=errPerc*avgI[i]/100;		
+		}	
+	}
+
+
+	// Define q=0 position.
+	// First checks to see if beam position was found using the
+	// beam profile macro
+
+	if (beamPos[imageId]==0){
+		// if beam position is not known, scan entire profile
+		// for maximum
+		maxI=0;
+		q0pos=0;
+		for (i=0;i<h;i++){
+			if (avgI[i]> maxI){
+				maxI=avgI[i];
+				q0pos=i;
+			}
+		}
+	}else{
+		// If beam position was previously identified from beam profile,
+		// find maximum intensity in region previously identified 	
+		q0pos=(y+h)-beamPos[imageId];
+		maxI = avgI[q0pos];
+		for(i=-5;i<6;i++){
+			if (avgI[q0pos+i] > maxI){
+				q0pos = q0pos+i;
+				maxI=avgI[q0pos];
+			}
+		}
+	}
+		
+	// calculate q-values for each pixel position
+	for (i=0;i<h;i++){
+		q[i] = deltaQ(i-q0pos);
+	}
+
+	// set default directory for editor window (text window) to match image directory
+	defDir = getDirectory("image");
+	call("ij.plugin.frame.Editor.setDefaultDirectory", defDir);
+	
+	// Make plot
+	Plot.create(imageName+" Profile","Q","Avg Intensity",q,avgI);
+	Plot.show;
+	
+	// create data window
+	makeDataWindow(q,avgI,err,imageName,imageId);
+}
+
+function clearImageParam() {
+	// resets image-specific parameters to zero
+	imageId=-1*getImageID();
+	autoCenter[imageId]=0;
+	darkCurr[imageId]=0;
+	beamParamA[imageId]=0;
+	beamParamB[imageId]=0;
+	beamTopWidth[imageId]=0;
+	beamBottomWidth[imageId]=0;
+	beamHalfWidth[imageId]=0;
+	beamPos[imageId]=0;
+}
+
+
+function beamProfile(){
+	
+	// Plot and fit beam profile - for smearing/desmearing corrections
+	// beam is assumed to be oriented with its length along the x (horizontal) dimension
+	// Dimensions are refered to as length (horizontal)
+	// and height (vertical)
+	
+	imageId = -getImageID();
+	showStatus("Fitting beam profile");
+	getSelectionBounds(x,y,l,h);
+
+	// make sure box is at least 11 pixels high
+	if (h<11){
+		h=11;
+	}
+	makeRectangle(x,y,l,h);
+	
+	
+	// first look at vertical profile to select central region 
+	// for measuring beam length profile
+	// positions are defined relative to the *top* of the selection!
+	avgIv=newArray(h);
+	for (i=0; i< h; i++){
+		yCoor = y+i;
+		avgIv[i]=0;
+		for (j=0;j<l;j++){
+			xCoor = x+j;
+			avgIv[i]+=pixelValue(xCoor,yCoor);
+			}
+		avgIv[i] /= h;
+	}
+	
+	// find maximum in vertical profile
+	iMaxv = 0;
+	centerv=0;
+	for(i=0;i<h;i++){
+		if (avgIv[i] > iMaxv){
+			centerv = i;
+			iMaxv=avgIv[i];
+		}
+	}
+	
+
+	// find positions of minima on either side of maximum
+	min = iMaxv;
+	upMinPos = centerv;
+	for (i=centerv+1; i<h;i++){
+		if (avgIv[i] < min) {
+			min = avgIv[i];
+			upMinPos = i;
+		}
+	}
+	
+	
+	min = iMaxv;
+	loMinPos = centerv;
+	for (i=centerv-1;i>=0;i--){
+		if (avgIv[i] < min) {
+			min = avgIv[i];
+			loMinPos = i;
+		}
+	}
+	
+	// next measure profile along beam length (horizontal)
+	avgIl=newArray(l);
+	for (i=0; i< l; i++){
+		xCoor = x+i;
+		avgIl[i]=0;
+		for (j=loMinPos;j<=upMinPos;j++){
+			yCoor = y+j;
+			avgIl[i]+=pixelValue(xCoor,yCoor);
+			}
+		avgIl[i] /= (upMinPos-loMinPos);
+	}
+	
+
+	// fit profile to a special function composed of two symmetrical sigmoidal curves
+	// centered at q=0
+
+	blf = fitBeamLengthProf(avgIl);
+	
+	centerl=blf[3];
+
+	// define coordinates in q-units with 0 at center of profile
+	q=newArray(l);
+	for (i=0;i<l;i++){
+		q[i] = deltaQ(i-centerl);
+	}
+	
+	
+	// normalize profile
+	maxFitI = blf[0]-blf[1]/(1+exp(blf[2]/blf[4]));
+	
+	
+	iNorm = newArray(l);
+	for (i=0;i<l;i++){
+		iNorm[i] = (avgIl[i]-blf[0]+blf[1])/(maxFitI-blf[0]+blf[1]);
+	}
+	
+	// calculate normalized fit profile
+	a = exp(blf[2]/blf[4]);
+	b = deltaQ(blf[4]);
+	fitI=newArray(l);
+	for (i=0;i<l;i++){
+		fitI[i] = (1+a)/(a+exp(abs(q[i])/b));
+	}
+
+	// Trapezoid approximation to the fit beam profile
+	qTrap=newArray(4);
+	iTrap=newArray(0,1,1,0);
+	
+	// fit through normalized I values of 0.2 and 0.8
+	trapSlope= 0.6/(b*log((1.25+0.25*a)/(5+4*a)));
+	trapIntercept=0.8-trapSlope*b*log(1.25+0.25*a);
+	qTrap[2]=(1-trapIntercept)/trapSlope;
+	qTrap[3]=-trapIntercept/trapSlope;
+	qTrap[0]=-qTrap[3];
+	qTrap[1]=-qTrap[2];
+	
+	topWidth= 2*qTrap[2];
+	bottomWidth = 2*qTrap[3];
+	A=(topWidth+bottomWidth)/2;
+	L=bottomWidth-A;
+	
+
+	// make plot of profile with fit function and trapezoid
+	Plot.create("Beam-Length Profile","Q","Avg Intensity",q,iNorm);
+	Plot.setLimits(q[0],q[l-1],-0.1,1.1);
+	Plot.setColor("red");
+ 	Plot.add("lines",q,fitI);
+ 	Plot.setColor("blue");
+ 	Plot.add("lines",qTrap,iTrap);
+	Plot.setColor("black");
+	
+	fitParamString = "I = (1+a)/(a+exp(abs(Q)/b)) \n";
+	fitParamString = fitParamString + "a = " + d2s(a,3) + "\n";
+	fitParamString = fitParamString + "b = " + d2s(b,3) + "\n";
+	fitParamString = fitParamString + "R^2 = " + d2s(blf[5],3)+"\n \n";
+	
+	fitParamString = fitParamString + "Trapezoid approximation: \n";
+	fitParamString = fitParamString + "Top width = " + d2s(topWidth,3)  + "\n";
+	fitParamString = fitParamString + "Bottom width = " + d2s(bottomWidth,3)  + "\n \n";
+	fitParamString = fitParamString + "A = " + d2s(A,3)  + "\n";
+	fitParamString = fitParamString + "L = " + d2s(L,3)  + "\n";
+	
+	Plot.addText(fitParamString,0.3,0.3);
+	Plot.show;
+
+
+	// Save values of beam length profile parameters in global arrays
+	beamParamA[imageId] = a;
+	beamParamB[imageId] =b ;
+	
+	beamBottomWidth[imageId] = bottomWidth;
+	beamTopWidth[imageId] = topWidth;
+	
+	
+
+	// Next analyze width profile (vertical direction)
+	
+	// In horizontal direction, limit averaging to region defined by the 
+	// top of the trapezoid
+	// In vertical direction,select region between minima and fit to Gaussian function
+	
+	
+	centralH= upMinPos - loMinPos + 1;
+	
+	centerIs=newArray(centralH);
+	centerXs=newArray(centralH);
+	avgIv=newArray(h);
+	for (i=0;i<h;i++){
+		yCoor = i+y;
+		avgI=0;
+		centerW=0;
+		for (j=0;j<l;j++){
+			if (q[j]>= qTrap[1] && q[j]<=qTrap[2]) {
+				xCoor = x+j;
+				avgI = avgI + pixelValue(xCoor,yCoor);
+				centerW += 1;
+			}
+		}
+		avgIv[i]=avgI/centerW;
+		if (i>=loMinPos && i< upMinPos){
+			centerIs[i-loMinPos] = avgIv[i];
+			centerXs[i-loMinPos]=i-loMinPos;
+		}
+	}
+		
+	
+ 	Fit.doFit("Gaussian",centerXs,centerIs);
+
+ 	center=loMinPos+Fit.p(2);
+	
+	
+ 	// calculate q-values relative to Gaussian peak
+ 	// q decreases from top of box (i=0) to bottom
+ 	q=newArray(h);
+	for (i=0;i<h;i++){
+		q[i] = deltaQ(center-i);
+	}
+	
+	// calculate normalized profile
+	
+	iNorm = newArray(h);
+	for (i=0;i<h;i++){
+		iNorm[i] = (avgIv[i]-Fit.p(0))/(Fit.p(1)-Fit.p(0));
+	}
+
+
+	// calculate normalized fit values
+	fitI = newArray(h);
+	sigma = deltaQ(abs(Fit.p(3)));
+	
+	for (i=0;i<h;i++){
+		fitI[i] = exp(-q[i]*q[i]/(2*sigma*sigma));
+	}
+	
+	halfWidth=sigma*sqrt(2*log(2));
+	
+	// trapezoid approximation
+	
+	qTrap[0]=-2*sigma;
+	qTrap[1]=-sigma*(2-sqrt(exp(1)));
+	qTrap[2]=-qTrap[1];
+	qTrap[3]=-qTrap[0];
+	
+	topWidth= 2*qTrap[2];
+	bottomWidth = 2*qTrap[3];
+	A=(topWidth+bottomWidth)/2;
+	L=bottomWidth-A;
+	
+	fitParamString = "half-width = " + d2s(halfWidth,5) + " " + qUnits +"\n \n";
+	fitParamString = fitParamString + "Trapezoid approximation: \n";
+	fitParamString = fitParamString + "Top width = " + d2s(topWidth,4)  + "\n";
+	fitParamString = fitParamString + "Bottom width = " + d2s(bottomWidth,4)  + "\n \n";
+	fitParamString = fitParamString + "A = " + d2s(A,4)  + "\n";
+	fitParamString = fitParamString + "L = " + d2s(L,4)  + "\n";
+
+
+
+	Plot.create("Beam-Width Profile","Q","Normalized Intensity",q,iNorm);
+
+	Plot.setLimits(q[h-1],q[0],-0.1,1.1);
+	Plot.setColor("red");
+ 	Plot.add("lines",q,fitI);
+ 	Plot.setColor("blue");
+ 	Plot.add("lines",qTrap,iTrap);
+	Plot.setColor("black");
+	Plot.addText(fitParamString, 0.05, 0.1);
+	
+	Plot.show;
+
+	// Save values of beam parameters in global arrays
+
+	beamHalfWidth[imageId] = halfWidth;
+	
+	beamPos[imageId] = y+centerv;
+	
+	// auto center rectangle for integration
+	selectImage(-imageId);
+	autoCenterRectangle();
+}
+
+function fitBeamLengthProf(iArray){
+	// Function to fit beam length profile to the sigmoidal function
+	// used in the beam profile function
+	// input parameter is a an array of y-values
+	// x-values are index
+	// returns fit parameters, including R^2
+	profFunc="y = a - b/(1 + exp((c-abs(x-d))/e))";
+	n=lengthOf(iArray);
+	xArray=newArray(n);
+	
+	for (i=0;i<n;i++){
+		xArray[i]=i;
+	}
+// 	Plot.create("Pre-fit Profile","Q","Intensity",xArray,iArray);
+// 	Plot.show;
+	
+	iMax=0;
+	for (i=0;i<n;i++){
+		if (iArray[i]>iMax) {
+			iMax = iArray[i];
+		}
+	}
+	iMin=iMax;
+	for (i=0;i<n;i++){
+		if (iArray[i]<iMin) {
+			iMin = iArray[i];
+		}
+	}
+
+	initialGuesses = newArray(iMax, iMax-iMin, n/4, n/2, 100);
+//	print(initialGuesses[0],initialGuesses[1],initialGuesses[2],initialGuesses[3],initialGuesses[4]);
+//	Fit.logResults;
+	Fit.doFit(profFunc,xArray,iArray,initialGuesses);
+
+
+//	Fit.plot;
+	results = newArray(6);
+	results[0]=Fit.p(0);
+	results[1]=Fit.p(1);
+	results[2]=Fit.p(2);
+	results[3]=Fit.p(3);
+	results[4]=Fit.p(4);
+	results[5]=Fit.rSquared;
+	
+	return results;
+}
+
+function makeDataWindow(q,avgI,err,imageName,imageId){
+	// Writes data with pdh header to a text window
+	// inputs are arrays for q, avgI and err, plus imageName and imageId
+	// Gets header information from global variables
+	// and from image property arrays, using the imageId index
+	// Beam profile parameters
+	if (beamProfType == "Sigmoid"){
+		a = beamParamA[imageId];
+		b = beamParamB[imageId];
+		beamType = 1;
+	} else {
+		a = beamBottomWidth[imageId];
+		b = beamTopWidth[imageId];
+		beamType = 2;
+	}
+	
+	if ((a==0) & (b==0)){
+		beamType=0;
+	}
+	
+	// Calculate detSlitLength in q-units
+	if (qUnits=="nm-1"){
+		lambda = wavelength/10;
+	} else {
+		lambda = wavelength;
+	}
+	sineTheta=0.5*profWidth/sdDistance;
+	detSlitLength = 4*PI*sineTheta/lambda;
+
+	
+	title1 = imageName + "_data";
+	title2 = "["+title1+"]";
+  	f = title2;
+	if (isOpen(title1)){
+     print(f, "\\Update:"); // clears the window
+	} else {
+		run("Text Window...","name="+title2+" menu");
+	}
+	n=lengthOf(q);
+	print(f,imageName+"\n");
+	print(f,"SAXS \n");
+	// integer constants
+	print(f,i9(n)+" "); // number of data points
+ 	print(f,i9(beamType)+" "); // beam profile type
+	for (i=0;i<6;i++){
+		print(f,i9(0)+" "); 
+	}
+	print(f,"\n");
+	// Real-value constants
+	print(f,e146(0)+ " ");
+	print(f,e146(sdDistance)+ " "); // sample-detector distance in mm
+	print(f,e146(0)+ " ");
+	print(f,e146(1)+ " "); // normalization factor
+	print(f,e146(wavelength/10) +" \n"); // wavelength in nm
+	// second line of real-value constants  
+	// Utah specific parameters -- beam profile parameters and q-scale
+	print(f,e146(a)+ " ");
+	print(f,e146(b)+ " ");
+	print(f,e146(beamHalfWidth[imageId])+ " ");
+	print(f,e146(detSlitLength)+ " ");
+	if (qUnits =="A-1"){
+		print(f,e146(1)+ " \n");
+	} else if (qUnits == "nm-1"){
+		print(f,e146(10)+ " \n");
+	} else {
+		print(f,e146(0)+ " \n");
+	}
+	// data points
+	for (i=0;i<n;i++){
+		qVal= q[i];
+		iVal = avgI[i];
+		errVal=err[i];
+		print(f,e146(qVal) +" " + e146(iVal) + " " + e146(errVal)+" \n");
+	}
+}
+
+function pixelValue(xCoor,yCoor){
+	// The Cyclone image plate reader stores its output
+	// as the square root of the actual values, to increase
+	// the potential dynamic range of the stored data
+	// This little function replaces the ImageJ getPixel and
+	// un-square-roots the data if imageDataType == "Square Root"
+	
+	if (imageDataType == "Square Root"){
+		return getPixel(xCoor,yCoor)*getPixel(xCoor,yCoor)
+	} else {
+		return getPixel(xCoor,yCoor)
+	}
+}
+
+function i9(value) {
+	// Function to make text string out of a number according to the Fortran I9 format specification
+	// right justified integer in 9 spaces
+	iStr = d2s(value,0);
+	spaces = 9-lengthOf(iStr);
+	for (i=0;i<spaces;i++){
+		iStr = " "+iStr;
+	}
+	return iStr;
+}
+
+function e146(value){
+	// Function to make text string out of a number according to the Fortran E14.6 format specification
+	// right justified exponential form of floating point number in 14 spaces with 6 digits on right of decimal.
+	if (value == 0){
+		return "  0.000000E+00";
+	} else {
+		exponent = floor(log(abs(value))/log(10))+1;
+		sig = value/pow(10,exponent);
+		sigStr= d2s(sig,6);
+		if (exponent>=0){
+			if (exponent < 10) {
+				expStr="E+0"+d2s(exponent,0);
+			} else {
+				expStr="E+"+d2s(exponent,0);
+			}
+		} else {
+			if (exponent > -10) {
+				expStr="E-0"+d2s(abs(exponent),0);
+			} else {
+				expStr="E"+d2s(exponent,0);
+			}
+		}
+		e146str = sigStr+expStr;
+		spaces = 14-lengthOf(e146str);
+		for (i=0;i<spaces;i++) {
+			e146str = " "+e146str;
+		}
+		return e146str;
+	}
+}
+
+
+function fitParab(dataArray){
+	// function to fit a data array to a 2nd order polynoial function
+	// used in the autoCenterRectangle function
+	// input parameter is a an array of y-values
+	// x-values are index
+	// returns three fitting parameters - 2nd order polynoial coefficients
+	n=lengthOf(dataArray);
+	xArray=newArray(n);
+	for (i=0;i<n;i++){
+		xArray[i]=i;
+	}
+	Fit.doFit("2nd Degree Polynomial", xArray, dataArray);
+	results=newArray(3);
+	results[0] = Fit.p(0);
+	results[1] = Fit.p(1);
+	results[2] = Fit.p(2);
+	return results;
+}
+
+
+function deltaQ(deltaPixel){
+	// function to convert a number of pixels into a Q-value
+	// Uses global variables for wavelength, wavelength unit, 
+	// sample-detector distance and pixel pitch
+	// returns Q-value corresponding to the number of pixels
+	if (qUnits=="nm-1"){
+		lambda = wavelength/10;
+	} else {
+		lambda = wavelength;
+	}
+	sineTheta=0.5*deltaPixel*mmPerPixel/sdDistance;
+	dQ = 4*PI*sineTheta/lambda;
+	return dQ;
+}
+
+

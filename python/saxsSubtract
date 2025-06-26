@@ -1,0 +1,252 @@
+#! /Library/Frameworks/Python.framework/Versions/Current/bin/python
+
+#   A Python script to automatically subtract a reference profile from SAXS data
+
+#  (c) 2009-2011 by David P. Goldenberg
+#  Please send feature requests, bug reports, or feedback to this address:
+#           Department of Biology
+#           University of Utah
+#           257 South 1400 East
+#           Salt Lake City, UT
+#     
+#           goldenberg@biology.utah.edu
+#     
+#  This software is distributed under the conditions of the BSD license.
+#  Please see the documentation for further details.
+
+import sys
+from optparse import OptionParser
+
+import numpy as np 
+import matplotlib.pyplot as plt
+import saxs as sx
+from uncertainties import unumpy
+
+
+info = """  saxsSubtract: 
+    A Python script to automatically subtract a reference profile from SAXS data.
+    
+    Options:
+      -h, --help            show this help message and exit
+      -i, --info            Show additional information and exit
+      -r, --raw             Raw input file. Default is pdh format
+      -s, --si              Read data from system standard input and write to
+                            standard output
+      --so                  Direct output to system standard output
+      -t PLOTTYPE, --plot=PLOTTYPE
+                            Plot type. Options are none, linear, log,
+                            loglog,guinier, kratky. Default is linear
+       --cf=CF              Calibration factor used to calculate absolute
+                            scattering intensity, with units of cm
+      --nonorm              No normalization of sample and reference data.
+                            Default is to normalize
+
+    
+    This program is primarily intended for data from the Anton-Paar SAXSess instrument,
+    which includes an attenuated beam profile.  The peak at q=0 is used to normalize
+    the sample and referance profiles.
+    
+    If the the --nonorm option is used, the reference profile is subtracted without any normalization.
+    
+    The program requires two input arguments, the names of the sample and reference files
+    The difference profile is directed to standard output
+    Plots of the original and difference profiles are automatically generated
+    using the matplotlib python library.
+    
+    If a calibration factor is provided with the --cf option,
+    the program normalizes the intensity to reflect absolute intensity, 
+    with units cm-1.  The calibration factor is usually determined from
+    a water reference measurement and is assumed to have units of cm. 
+    The calibration factor is assumed to be expressed relative to intensities
+    normalized using the same beam geometry and attenuation,
+    and the same cell dimensions.
+    
+    The default behavior is to assume the data files are in PDH format
+    If the option -r is used, the program assumes the files 
+    are in a "raw" format and only looks for rows containing exactly three fields,
+    and that the lask character of the first field is a digit.
+    Executing the program with the argument "-i", prints this information.
+    Executing the program with no arguments prints a short message.
+    
+    For PDH files, the header information from the sample file is output
+    as the header for the difference file, except that the first line is
+    appended to include the names of the sample and reference files.
+    
+    After reading the data files, the program first trims both of them to a 
+    common length and range of q-values.  
+    The two files must use the same q-value intervals.
+    After trimming, each of the data files are normalized according to the
+    intensity of the beam peak.
+    
+    The normalized reference profile is subtracted from the normalized sample profile.
+    The errors in the difference profile are calculated using the Python uncertainties package.
+    
+    """
+    
+
+def main():
+    ###### Handle arguments and options with the optparse module
+    parser = OptionParser()
+    
+    parser.add_option("-i", "--info", action = "store_true", 
+                   dest="info", default = False, 
+                   help="Show additional information and exit")    
+    parser.add_option("-r", "--raw", action = "store_true", dest="rawFile", default = False, 
+                       help="Raw input file. Default is pdh format")
+    parser.add_option("-s", "--si", action = "store_true", dest="stdin", default = False, 
+                help="Read data from system standard input and write to standard output")  
+    parser.add_option("--so", action = "store_true", dest="stdo", default = False, 
+                       help="Direct output to system standard output")
+    parser.add_option("-t", "--plot", action = "store", type = "string", 
+                       dest="plotType", default = "linear", 
+                       help="Plot type. Options are none, linear, log, loglog,"
+                             + "guinier, kratky. Default is linear")    
+
+    parser.add_option("--cf", action = "store", dest="cf", default = 0.0, type=float, 
+                       help="Calibration factor used to calculate absolute scattering intensity, "+
+                            "with units of cm")
+    parser.add_option("--nonorm", action = "store_true", dest="noNorm", default = False, 
+                       help="No normalization of sample and reference data.  Default is to normalize")
+                  
+    (options, args) = parser.parse_args()
+    
+    if (options.cf !=0 and options.noNorm == True):
+        message = '\nThe --cf option requires nomalization of the profiles '\
+                    + 'and cannot be used with the --nonorm option.'
+        sys.exit(message)
+        
+    if (options.info):
+        sys.exit(info)
+        
+    message = '\n saxsSubtract: A python script to subtract a reference '\
+                + 'scattering curve from a sample curve. '\
+                + '\n For more information, type > saxsSubtract.py -i'
+
+    fileNames = sx.fileNamer(options,args,2, 'diff')
+    if fileNames == None:
+        sys.exit(message)
+    else:
+        sampleFileName = fileNames[1]
+        outFileName = fileNames[2]
+    
+    refFileName =args[0]
+    ###### Window Title
+    if sampleFileName == None:
+        windowTitle = 'SAXS Subtract'
+    else:   
+        windowTitle = 'SAXS Subtract: ' + sampleFileName + ' - ' + refFileName
+
+    ###### Read input data
+    if options.rawFile:
+        sampleData = sx.readQIE(sampleFileName)
+        refData = sx.readQIE(refFileName)
+    else:
+        sampleHeader, sampleData = sx.readPdh(sampleFileName)
+        refHeader, refData = sx.readPdh(refFileName)
+        if sampleFileName != None:
+            sampleHeader[0] += "    Sample file: " + sampleFileName \
+                            + ", Reference file: " + refFileName
+        
+    ##### Check spacing of q values in the two files
+    deltaQsample = sampleData[0][1]-sampleData[0][0]
+    deltaQref = refData[0][1] - refData[0][0]
+    deltaDelta = abs(deltaQsample-deltaQref)
+    if deltaDelta > 1e-5:
+        message = """\nThe sample and reference files do not appear to have the same spacing of q-values"""
+        sys.exit(message)
+
+    ##### Find common range of q values in two data sets
+    qMin = max(sampleData[0][0],refData[0][0])
+    qMax = min(sampleData[0][-1],refData[0][-1])
+
+
+    ##### Trim data sets to common length    
+    sampleDataTrim = [[],[],[]]
+    for i, q in enumerate(sampleData[0]):
+        if (qMin <= q <= qMax):
+            sampleDataTrim[0].append(sampleData[0][i])
+            sampleDataTrim[1].append(sampleData[1][i])
+            sampleDataTrim[2].append(sampleData[2][i])
+    
+    refDataTrim = [[],[],[]]
+    for i, q in enumerate(refData[0]):
+        if (qMin <= q <= qMax):
+            refDataTrim[0].append(refData[0][i])
+            refDataTrim[1].append(refData[1][i])
+            refDataTrim[2].append(refData[2][i])
+
+    ##### Convert data into numpy arrays     
+    refData = np.array(refDataTrim)
+    sampleData = np.array(sampleDataTrim)
+
+    
+    ##### Unless no-normalization option is chosen 
+    ##### Normalize sample and reference data by beam peak intensities
+    if options.noNorm == False:
+        sampleData = normalData(sampleData)
+        refData = normalData(refData)
+    
+    ######## Create unumpy arrays with uncertainties
+    
+    sampleIu = unumpy.uarray((sampleData[1],sampleData[2]))
+    refIu = unumpy.uarray((refData[1],refData[2]))
+    
+    ######### Subtract reference data
+    diffIu = sampleIu - refIu
+    
+    difData = [sampleData[0], unumpy.nominal_values(diffIu), unumpy.std_devs(diffIu)]
+    
+    
+    ######## Calculate absolute intensities, if option is chosen  ############
+    if options.cf > 0:
+        difData[1] = difData[1]/options.cf
+        difData[2] = difData[2]/options.cf
+        sampleHeader[2][2] = 1  # Header flag to indicate absolute intensities
+
+    ######### Plot data
+    if options.plotType != 'none':
+
+        fig = plt.figure() 
+        
+        plotParam = [options.plotType, 0,0]
+        if options.rawFile:
+            qUnits=0
+        else:
+            qUnits = sampleHeader[4][4]
+        if options.cf > 0:
+            absI = True
+        else:
+            absI = False
+        plotPos = 211
+        
+        legends = [sampleFileName, refFileName]
+        ax1 = sx.saxsPlot(fig,plotPos,plotParam,[sampleData,refData],
+                            legends, qUnits=qUnits, absI=False) 
+    
+        plotPos = 212
+        ax2 = sx.saxsPlot(fig,plotPos,plotParam,[difData],['difference'],qUnits=qUnits, absI=absI) 
+        
+        fig.subplots_adjust(bottom=0.1, hspace=0.25) 
+        fig.canvas.set_window_title(windowTitle) 
+        plt.show()
+
+    #### write difference data to output file
+    if options.rawFile:
+        sx.writeQIE(outFileName,difData)
+    else:
+        sx.writePdh(outFileName,sampleHeader,difData)
+
+
+
+def normalData(saxsData):
+    ##### find data point with q closest to zero
+    jQzero = np.abs(saxsData[0]).argmin()
+    ##### average intensities of five points closest to q=zero
+    beamPeakAvg = np.average(saxsData[1][jQzero-2:jQzero+3])
+    ##### return data normalized by beam peak intensity
+    return [saxsData[0],saxsData[1]/beamPeakAvg, saxsData[2]/beamPeakAvg]
+        
+
+
+if __name__=="__main__":
+    main()
