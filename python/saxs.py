@@ -132,25 +132,25 @@ def writePdh(pdhFileName, header,data):
     else: 
         outFile = None
     
-    print >> outFile, header[0]
+    print(header[0], file=outFile)
     for field in header[1]:
-        print >> outFile, field[:4],
-    print >> outFile, ""
+        print(field[:4], end=' ', file=outFile)
+    print("", file=outFile)
     for field in header[2]:
-        print >> outFile, "%9i" % field,
-    print >> outFile, ""  
+        print("%9i" % field, end=' ', file=outFile)
+    print("", file=outFile)  
     for field in header[3]:
-        print >> outFile, "%14.6E" % field,
-    print >> outFile, ""  
+        print("%14.6E" % field, end=' ', file=outFile)
+    print("", file=outFile)  
     for field in header[4]:
-        print >> outFile, "%14.6E" % field,
-    print >> outFile, ""
+        print("%14.6E" % field, end=' ', file=outFile)
+    print("", file=outFile)
     
     for i in range(len(data[0])):
-        print >> outFile, "%14.6E" % data[0][i],
-        print >> outFile, "%14.6E" % data[1][i],
-        print >> outFile, "%14.6E" % data[2][i],
-        print >> outFile, ""    
+        print("%14.6E" % data[0][i], end=' ', file=outFile)
+        print("%14.6E" % data[1][i], end=' ', file=outFile)
+        print("%14.6E" % data[2][i], end=' ', file=outFile)
+        print("", file=outFile)    
     
     if outFile != None:
         outFile.close()
@@ -203,15 +203,15 @@ def writeQIE(outFileName, data, noErr=False):
 
 
     if noErr == False:  
-        print >> outFile, '#Q \tI \tIerror'
+        print('#Q \tI \tIerror', file=outFile)
     else:
-        print >> outFile, '#Q \tI'
+        print('#Q \tI', file=outFile)
         
     for i in range(len(data[0])):
         if noErr == False:
-            print >> outFile, '%-8.5e \t %8.5e \t %8.5e' % (data[0][i], data[1][i], data[2][i])
+            print('%-8.5e \t %8.5e \t %8.5e' % (data[0][i], data[1][i], data[2][i]), file=outFile)
         else:
-            print >> outFile, '%-8.5e \t %8.5e' % (data[0][i], data[1][i])
+            print('%-8.5e \t %8.5e' % (data[0][i], data[1][i]), file=outFile)
 
     if outFile != None:
         outFile.close()
@@ -659,11 +659,11 @@ def saxsPlot(fig,plotPos, plotParam, scattData, legends=[],colors =[], qUnits=0,
         ax.set_color_cycle(colors)
     
     if qUnits ==1:
-        qUnitsStr = " ($\AA^{-1}$)"
-        qSqUnitsStr = " ($\AA^{-2}$)"
+        qUnitsStr = r" ($\AA^{-1}$)"
+        qSqUnitsStr = r" ($\AA^{-2}$)"
     elif qUnits ==10:
-        qUnitsStr = " (nm$^{-1}$)"
-        qSqUnitsStr = " (nm${-2}$)"
+        qUnitsStr = r" (nm$^{-1}$)"
+        qSqUnitsStr = r" (nm${-2}$)"
     else:
         qUnitsStr = ""
         qSqUnitsStr = ""
@@ -683,9 +683,9 @@ def saxsPlot(fig,plotPos, plotParam, scattData, legends=[],colors =[], qUnits=0,
                     linestyle='None', marker='.',capsize=0,ms=1,label=label)
             else:
                 ax.plot(dataSet[0],dataSet[1], label=label)
-            if type(ilim) == types.ListType and len(ilim) ==2:
+            if type(ilim) == list and len(ilim) ==2:
                 ax.set_ylim(ilim)
-            if type(qlim) == types.ListType and len(qlim) ==2:
+            if type(qlim) == list and len(qlim) ==2:
                 ax.set_xlim(qlim)
             ax.set_xlabel('$q$' + qUnitsStr)
             ax.set_ylabel('$I$')
@@ -697,9 +697,9 @@ def saxsPlot(fig,plotPos, plotParam, scattData, legends=[],colors =[], qUnits=0,
             else:
                 ax.plot(dataSet[0],dataSet[1], label=label)
             ax.set_yscale('log')
-            if type(ilim) == types.ListType and len(ilim) ==2:
+            if type(ilim) == list and len(ilim) ==2:
                 ax.set_ylim(ilim)
-            if type(qlim) == types.ListType and len(qlim) ==2:
+            if type(qlim) == list and len(qlim) ==2:
                 ax.set_xlim(qlim)
             
             ax.set_xlabel('$q$' + qUnitsStr)
@@ -713,9 +713,9 @@ def saxsPlot(fig,plotPos, plotParam, scattData, legends=[],colors =[], qUnits=0,
                 ax.plot(dataSet[0],dataSet[1], label=label)
             ax.set_xscale('log')
             ax.set_yscale('log')
-            if type(ilim) == types.ListType and len(ilim) ==2:
+            if type(ilim) == list and len(ilim) ==2:
                 ax.set_ylim(ilim)
-            if type(qlim) == types.ListType and len(qlim) ==2:
+            if type(qlim) == list and len(qlim) ==2:
                 ax.set_xlim(qlim)
             
             ax.set_xlabel('$q$' + qUnitsStr)
@@ -730,14 +730,14 @@ def saxsPlot(fig,plotPos, plotParam, scattData, legends=[],colors =[], qUnits=0,
                     marker='.',capsize=0,ms=1, label=label)
             else:
                 ax.plot(plotQ,plotI, label=label)
-            if type(ilim) == types.ListType and len(ilim) ==2:
+            if type(ilim) == list and len(ilim) ==2:
                 ax.set_ylim([np.log(ilim[0]),np.log(ilim[1])])
-            if type(qlim) == types.ListType and len(qlim) ==2:
+            if type(qlim) == list and len(qlim) ==2:
                 if qlim[0]<0:
                     qlim[0]=0
                 ax.set_xlim([np.square(qlim[0]),np.square(qlim[1])])
-            ax.set_xlabel('$q^2$' + qSqUnitsStr)
-            ax.set_ylabel('$\ln(I)$')
+            ax.set_xlabel(r'$q^2$' + qSqUnitsStr)
+            ax.set_ylabel(r'$\ln(I)$')
         
         if plotType == 'kratky':
             plotI=dataSet[1]*np.square(dataSet[0])
@@ -748,7 +748,7 @@ def saxsPlot(fig,plotPos, plotParam, scattData, legends=[],colors =[], qUnits=0,
                     marker='.',capsize=0,ms=1, label=label)
             else:
                 ax.plot(plotQ,plotI, label=label)
-            if type(qlim) == types.ListType and len(qlim) ==2:
+            if type(qlim) == list and len(qlim) ==2:
                 ax.set_xlim(qlim)
         
             ax.set_xlabel('$q$' + qUnitsStr)
@@ -761,7 +761,7 @@ def saxsPlot(fig,plotPos, plotParam, scattData, legends=[],colors =[], qUnits=0,
             
     if absI:
         if plotType == 'kratky':
-            ax.set_ylabel('$Iq^2$ (cm$^{-1} \AA^{-2}$)')
+            ax.set_ylabel(r'$Iq^2$ (cm$^{-1} \AA^{-2}$)')
         else:        
             label = ax.get_ylabel()
             ax.set_ylabel(label + ' (cm$^{-1}$)')
@@ -916,10 +916,10 @@ def smooth(x,window_len=11,window='hanning'):
     """
 
     if x.ndim != 1:
-        raise ValueError, "smooth only accepts 1 dimension arrays."
+        raise ValueError("smooth only accepts 1 dimension arrays.")
 
     if x.size < window_len:
-        raise ValueError, "Input vector needs to be bigger than window size."
+        raise ValueError("Input vector needs to be bigger than window size.")
 
 
     if window_len<3:
@@ -927,7 +927,7 @@ def smooth(x,window_len=11,window='hanning'):
 
 
     if not window in ['flat', 'hanning', 'hamming', 'bartlett', 'blackman']:
-        raise ValueError, "Window is not one of 'flat', 'hanning', 'hamming', 'bartlett', 'blackman'"
+        raise ValueError("Window is not one of 'flat', 'hanning', 'hamming', 'bartlett', 'blackman'")
 
 
     s=np.r_[2*x[0]-x[window_len:1:-1],x,2*x[-1]-x[-1:-window_len:-1]]

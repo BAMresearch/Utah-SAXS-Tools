@@ -32,11 +32,11 @@ info = """ makePdh
     
     Requires one argument, name of the pdh file
     Options:
-	  -h, --help            show help message and exit
-	  -i, --info            Show additional information and exit
-	  --noErr               no I error data
-	  -c NUMBCOLS, --cols=NUMBCOLS
-							Number of columns in input file. Defaut = 3.
+      -h, --help            show help message and exit
+      -i, --info            Show additional information and exit
+      --noErr               no I error data
+      -c NUMBCOLS, --cols=NUMBCOLS
+                            Number of columns in input file. Defaut = 3.
     
     Writes to new file with name specified by interactive prompt.
     
@@ -77,8 +77,8 @@ def main():
     outFileName = rootName + ".pdh"
     
     if options.numbCols < 2:
-    	message = "The number of columns must be at least two."
-    	sys.exit(message)
+        message = "The number of columns must be at least two."
+        sys.exit(message)
 
     if options.numbCols==2:
         data = sx.readQI(inFileName)
@@ -98,42 +98,42 @@ def main():
     pdhHeader[3] = [0.0, 0.0, 0.0, 1.0, 1.542]
     pdhHeader[4] = [0.0, 0.0, 0.0, 0.0, 0.0]
     
-    print ""
-    print "Input file name: " + inFileName
-    outFile = raw_input("Output file name (" + outFileName + "): ")
+    print("")
+    print("Input file name: " + inFileName)
+    outFile = input("Output file name (" + outFileName + "): ")
     if str.strip(outFile) != "":
         outFileName = str.strip(outFile)   
   
-    print ""
-    print "PDH-specified parameters "
-    desc= raw_input("Description: ")
+    print("")
+    print("PDH-specified parameters ")
+    desc= input("Description: ")
     pdhHeader[0] = desc    
 
-    keyWordString = raw_input("Key words (SAXS): ")
+    keyWordString = input("Key words (SAXS): ")
     if str.strip(keyWordString) != "":
         pdhHeader[1] = keyWordString.split()  
     
    
     pdhHeader[2][0] = noPtsInput(pdhHeader[2][0],data)
     
-    normFact = raw_input( "Normalization factor (" + str(pdhHeader[3][3]) + "): ")
+    normFact = input( "Normalization factor (" + str(pdhHeader[3][3]) + "): ")
     if str.strip(normFact) != "":
         pdhHeader[3][3] = float(normFact)
     
     
-    print ""
-    print "SAXSess parameters"
-    sample2det = raw_input( "Sample to detector distance in mm: ")
+    print("")
+    print("SAXSess parameters")
+    sample2det = input( "Sample to detector distance in mm: ")
     if str.strip(sample2det) != "":
         pdhHeader[3][1] = float(sample2det)
     
-    wavelength = raw_input( "Wavelength (" + str(pdhHeader[3][4]) + "): ")
+    wavelength = input( "Wavelength (" + str(pdhHeader[3][4]) + "): ")
     if str.strip(wavelength) != "":
         pdhHeader[3][4] = float(wavelength)
     
-    print ""
-    print "Utah SAXS Tools parameters"
-    beamType = raw_input( "Beam length profile type: \n" 
+    print("")
+    print("Utah SAXS Tools parameters")
+    beamType = input( "Beam length profile type: \n" 
     + "\t 0: None (default) \n"
     + "\t 1: Sigmoidal \n"
     + "\t 2: Trapezoidal \n"
@@ -142,29 +142,29 @@ def main():
         pdhHeader[2][1] = int(beamType)
 
     if pdhHeader[2][1] == 1:    
-        beamParamA = raw_input( "Sigmoidal beam length parameter a: ")
+        beamParamA = input( "Sigmoidal beam length parameter a: ")
         if str.strip(beamParamA) != "":
             pdhHeader[4][0] = float(beamParamA)
     
-        beamParamB = raw_input( "Sigmoidal beam length parameter b: ")
+        beamParamB = input( "Sigmoidal beam length parameter b: ")
         if str.strip(beamParamB) != "":
             pdhHeader[4][1] = float(beamParamB)
 
     elif pdhHeader[2][1] == 2:
-        beamParamA = raw_input( "Trapezoidal beam length parameter a (long side): ")
+        beamParamA = input( "Trapezoidal beam length parameter a (long side): ")
         if str.strip(beamParamA) != "":
             pdhHeader[4][0] = float(beamParamA)
     
-        beamParamB = raw_input( "Trapezoidal beam length parameter b (short side): ")
+        beamParamB = input( "Trapezoidal beam length parameter b (short side): ")
         if str.strip(beamParamB) != "":
             pdhHeader[4][1] = float(beamParamB)
         
     if pdhHeader[2][1] != 0:
-        beamHW = raw_input( "Beam half-width in Q-units (" + str(pdhHeader[4][2]) + "): ")
+        beamHW = input( "Beam half-width in Q-units (" + str(pdhHeader[4][2]) + "): ")
         if str.strip(beamHW) != "":
             pdhHeader[4][2] = float(beamHW)
         
-        detSLW = raw_input( "Detector slit-width in Q-units (" + str(pdhHeader[4][3]) + "): ")
+        detSLW = input( "Detector slit-width in Q-units (" + str(pdhHeader[4][3]) + "): ")
         if str.strip(detSLW) != "":
             pdhHeader[4][3] = float(detSLW)
         
@@ -180,19 +180,19 @@ def main():
     sx.writePdh(outFileName,pdhHeader, data)
 
 def noPtsInput(defaultValue,data):
-    noPts = raw_input("No. of data pts (" + str(defaultValue) + "): ")
+    noPts = input("No. of data pts (" + str(defaultValue) + "): ")
     if str.strip(noPts) == "":
         return defaultValue
     else:
         noPts = int(noPts)
         if noPts > defaultValue:
-            print "The input file contains only " + str(defaultValue) + " points"
+            print("The input file contains only " + str(defaultValue) + " points")
             noPts = noPtsInput(defaultValue,data)
             return noPts
         if noPts < defaultValue:
             qMax = data[0][noPts-1]
-            print "The input file contains " + str(defaultValue) + " points"
-            trim = raw_input("Do you want to trim the data to " + str(noPts) 
+            print("The input file contains " + str(defaultValue) + " points")
+            trim = input("Do you want to trim the data to " + str(noPts) 
                     + " points, with Q-max = " + str(qMax) + " ? (y/N)?")
             trim = str.strip(trim)
             if trim == "":
@@ -207,7 +207,7 @@ def noPtsInput(defaultValue,data):
             return defaultValue
             
 def qScaleInput():
-    qScale = raw_input("Q-scale: \n"
+    qScale = input("Q-scale: \n"
         + "\t 1: A-1 (default) \n"
         + "\t 10: nm \n")
     if str.strip(qScale) == "":
@@ -217,21 +217,21 @@ def qScaleInput():
         if (qScale == 1.0 or qScale == 10.0):
             return qScale
         else:
-            print "Only 1 and 10 are valid values."
+            print("Only 1 and 10 are valid values.")
             qScale = qScaleInput()
             return qScale
                
 def absIinput(curValue):
     if curValue != 0:
         message = "Absolute intensity scale (cm-1), (Y/n)? "
-        absI = raw_input(message)
+        absI = input(message)
         if str.strip(absI) == "":
-        	return 1
+            return 1
     else:
         message = "Absolute intensity scale (cm-1), (y,N)? "
-    	absI = raw_input(message)
-    	if str.strip(absI) == "":
-    		return 0    	
+        absI = input(message)
+        if str.strip(absI) == "":
+            return 0        
     if (absI[0] == "y" or absI[0] == "Y"):
         return 1
     else:
